@@ -14,11 +14,10 @@ from captum.attr import IntegratedGradients
 
 from .models_shared import *
 
-
-
 class DirectPred(pl.LightningModule):
     def __init__(self, config, dataset, target_variables, batch_variables = None, val_size = 0.2):
         super(DirectPred, self).__init__()
+        self.automatic_optimization = False # important for training multiple networks, some adversarial
         self.config = config
         self.dataset = dataset
         self.target_variables = target_variables
@@ -42,7 +41,7 @@ class DirectPred(pl.LightningModule):
             else:
                 num_class = len(np.unique(self.dataset.ann[var]))
             self.MLPs[var] = MLP(input_dim=self.config['latent_dim'] * len(layers),
-                                         hidden_dim=self.config['hidden_dim'],
+                                         hidden_dim=self.config['supervisor_hidden_dim'],
                                          output_dim=num_class)
 
     def forward(self, x_list):
@@ -63,21 +62,35 @@ class DirectPred(pl.LightningModule):
 
         outputs = {}
         for var, mlp in self.MLPs.items():
-            outputs[var] = mlp(embeddings_concat)
-        return outputs  
+            # if the variable is a batch variable, detach the embeddings
+            # to avoid the MLP learning the batch variable to not affect the 
+            # encoders' learning 
+            if var in self.batch_variables:
+                outputs[var] = mlp(embeddings_concat.detach())
+            else:
+                outputs[var] = mlp(embeddings_concat)
+        return outputs
+
     
     
     def configure_optimizers(self):
         """
-        Configure the optimizer for the DirectPred model.
+        Configure the optimizers for the DirectPred model.
 
         Returns:
-            torch.optim.Optimizer: The configured optimizer.
+            None
         """
+        encoder_params = [p for encoder in self.encoders for p in encoder.parameters()]
 
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.config['lr'])
-        return optimizer
-    
+        # Create a separate optimizer for the encoders
+        self.encoder_optimizer = torch.optim.Adam(encoder_params, lr=self.config['lr'])
+
+        # Get parameters of all MLPs and create an optimizer for each MLP
+        self.MLP_optimizers = {}
+        for var in self.variables:
+            mlp_params = list(self.MLPs[var].parameters())
+            self.MLP_optimizers[var] = torch.optim.Adam(mlp_params, lr=self.config['lr'])
+        
     def compute_loss(self, var, y, y_hat):
         if self.dataset.variable_types[var] == 'numerical':
             # Ignore instances with missing labels for numerical variables
@@ -114,54 +127,110 @@ class DirectPred(pl.LightningModule):
                 loss = 0
         return loss
 
+    def compute_loss2(self, var, y, y_hat):
+        if self.dataset.variable_types[var] == 'numerical':
+            # Ignore instances with missing labels for numerical variables
+            valid_indices = ~torch.isnan(y)
+            if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
+                y_hat = y_hat[valid_indices]
+                y = y[valid_indices]
+
+                loss = F.mse_loss(torch.flatten(y_hat), y.float())
+            else:
+                loss = 0 # if no valid labels, set loss to 0
+        else:
+            # Ignore instances with missing labels for categorical variables
+            # Assuming that missing values were encoded as -1
+            valid_indices = (y != -1) & (~torch.isnan(y))
+            if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
+                y_hat = y_hat[valid_indices]
+                y = y[valid_indices]
+                loss = F.cross_entropy(y_hat, y.long())
+            else: 
+                loss = 0
+        return loss
+    
     def training_step(self, train_batch, batch_idx):
-        """
-        Perform a single training step.
-        Args:
-            train_batch (tuple): A tuple containing the input data and labels for the current batch.
-            batch_idx (int): The index of the current batch.
-        Returns:
-            torch.Tensor: The total loss for the current training step.
-        """
-        
-        dat, y_dict = train_batch       
+        dat, y_dict = train_batch
         layers = dat.keys()
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
-        total_loss = 0        
+
+        total_loss = 0
+        losses = {}
+
+        total_loss = 0
+        target_loss = 0
+        batch_loss = 0
+
         for var in self.variables:
             y_hat = outputs[var]
             y = y_dict[var]
+            loss = self.compute_loss2(var, y, y_hat)
 
-            loss = self.compute_loss(var, y, y_hat)
-            self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-            total_loss += loss            
+            if self.batch_variables is not None and var in self.batch_variables:
+                # Compute a "randomness" loss for batch variables
+                y_shuffled = y[torch.randperm(len(y))]
+
+                if self.dataset.variable_types[var] == 'numerical':
+                    loss_shuffled = F.mse_loss(torch.flatten(y_hat), y_shuffled.float())
+                else: 
+                    loss_shuffled = F.cross_entropy(y_hat, y_shuffled.long())
+
+                # penalize as much as the predictions deviate from random 
+                loss_shuffled = torch.abs(loss - loss_shuffled)
+                total_loss += loss_shuffled
+                batch_loss += loss_shuffled
+            else:
+                total_loss += loss
+                target_loss += loss
+
+            # Store each individual loss to use it later for individual MLP's gradient computation
+            losses[var] = loss
+
+        
+       # Compute gradients and update the parameters for the encoders
+        self.encoder_optimizer.zero_grad()  # zero the gradients of the encoder optimizer
+        self.manual_backward(total_loss, retain_graph=True)  # compute the gradients for the encoders
+
+        # Compute gradients and update the parameters for each MLP individually
+        for var in self.variables:
+            optimizer = self.MLP_optimizers[var]
+            optimizer.zero_grad()  # zero the gradients of the current MLP
+            self.manual_backward(losses[var], retain_graph=True)  # compute gradients based on the individual loss
+            optimizer.step()  # update the parameters of the current MLP
+
+        losses['train_loss'] = total_loss
+        losses['target_loss'] = target_loss
+        losses['batch_loss'] = batch_loss
+        
+        self.encoder_optimizer.step()  # update the parameters of the encoders
+        
+        self.log_dict(losses, on_step=False, on_epoch=True, prog_bar=True)
         return total_loss
+
 
     
     def validation_step(self, val_batch, batch_idx):
-        """
-        Perform a single validation step.
-
-        Args:
-            val_batch (tuple): A tuple containing the input data and labels for the current batch.
-            batch_idx (int): The index of the current batch.
-
-        Returns:
-            torch.Tensor: The total loss for the current validation step.
-        """
         dat, y_dict = val_batch       
         layers = dat.keys()
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
-        total_loss = 0        
+
+        total_loss = 0
+        losses = {}
         for var in self.variables:
             y_hat = outputs[var]
             y = y_dict[var]
 
-            loss = self.compute_loss(var, y, y_hat)
-            self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-            total_loss += loss            
+            loss = self.compute_loss2(var, y, y_hat)
+            total_loss += loss
+
+            #losses['_'.join(['val', var])] = loss
+
+        losses['val_loss'] = total_loss
+        self.log_dict(losses, on_step=True, on_epoch=True, prog_bar=True)
+
         return total_loss
 
     
