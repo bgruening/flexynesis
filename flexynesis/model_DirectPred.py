@@ -65,7 +65,7 @@ class DirectPred(pl.LightningModule):
             # if the variable is a batch variable, detach the embeddings
             # to avoid the MLP learning the batch variable to not affect the 
             # encoders' learning 
-            if var in self.batch_variables:
+            if self.batch_variables is not None and var in self.batch_variables:
                 outputs[var] = mlp(embeddings_concat.detach())
             else:
                 outputs[var] = mlp(embeddings_concat)
