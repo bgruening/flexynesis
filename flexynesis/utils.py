@@ -9,6 +9,12 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, cohen_kappa_score
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.stats import pearsonr
 
+import torch
+from sklearn.linear_model import LinearRegression
+from typing import Dict
+import warnings
+
+
 def plot_dim_reduced(matrix, labels, method='pca', color_type='categorical', scatter_kwargs=None, legend_kwargs=None, figsize=(10, 8)):
     """
     Plots the first two dimensions of the transformed input matrix in a 2D scatter plot,
@@ -126,3 +132,134 @@ def evaluate_regressor(y_true, y_pred):
     pearson_corr, _ = pearsonr(y_true, y_pred)
     return {"mse": mse, "r2": r2, "pearson_corr": pearson_corr[0]}
 
+
+def remove_batch_effects2(embeddings: pd.DataFrame, 
+                         target_variables: Dict[str, torch.Tensor], 
+                         batch_variables: Dict[str, torch.Tensor]) -> (pd.DataFrame, Dict[str, LinearRegression]):
+    """
+    Removes batch effects from embeddings while preserving target variable effects.
+    All variables (target and batch) are assumed to be numerical tensors.
+
+    Args:
+        embeddings: A DataFrame where each row is a sample and each column is a dimension of the embeddings.
+        target_variables: A dictionary where keys are target variable names and values are 1D tensors of target variable values.
+        batch_variables: A dictionary where keys are batch variable names and values are 1D tensors of batch variable values.
+
+    Returns:
+        A DataFrame with the same structure as embeddings but with batch effects removed.
+        A dictionary where keys are names of embedding dimensions and values are linear regression models that transform initial embeddings to corrected embeddings.
+    """
+    corrected_embeddings = embeddings.copy()
+    transformation_models = {}
+
+    for column in embeddings.columns:
+        # Identify the indices of samples with no missing labels
+        non_na_indices = []
+        for var_dict in [target_variables, batch_variables]:
+            for var_name, var_values in var_dict.items():
+                non_na_indices.append(~np.isnan(var_values.numpy()))
+        non_na_indices = np.all(non_na_indices, axis=0)
+
+        # Check if there are enough non-NA samples to fit a linear regression model
+        if np.sum(non_na_indices) < 10:
+            warnings.warn(f"Skipping batch correction for embedding dimension '{column}' due to insufficient non-NA samples.")
+            continue
+
+        # Fit a linear regression model with target variables only on the samples with no missing labels
+        target_predictors = np.column_stack([var_values.numpy()[non_na_indices] for var_values in target_variables.values()])
+        target_model = LinearRegression()
+        target_model.fit(target_predictors, embeddings.loc[non_na_indices, column].values)
+
+        # Get residuals from the target variables model
+        target_effects = target_model.predict(target_predictors)
+        residuals = embeddings.loc[non_na_indices, column].values - target_effects
+
+        # Fit a new linear regression model with batch variables on residuals
+        batch_predictors = np.column_stack([var_values.numpy()[non_na_indices] for var_values in batch_variables.values()])
+        batch_model = LinearRegression()
+        batch_model.fit(batch_predictors, residuals)
+
+        # Calculate the batch effects and subtract them from the residuals
+        batch_effects = batch_model.predict(batch_predictors)
+        corrected_residuals = residuals - batch_effects
+
+        # Add back the target effects to get the corrected embeddings
+        corrected_embeddings_non_na = target_effects + corrected_residuals
+
+        # Learn a linear transformation from the initial embeddings to the corrected embeddings
+        transformation_model = LinearRegression()
+        transformation_model.fit(embeddings.loc[non_na_indices, column].values.reshape(-1, 1),
+                                 corrected_embeddings_non_na.reshape(-1, 1))
+
+        # Store the transformation model
+        transformation_models[column] = transformation_model
+
+        # Apply the transformation to all embeddings
+        corrected_embeddings[column] = transformation_model.predict(embeddings[column].values.reshape(-1, 1))
+
+    return corrected_embeddings, transformation_models
+
+def remove_batch_effects(embeddings: pd.DataFrame, 
+                         target_variables: Dict[str, torch.Tensor], 
+                         batch_variables: Dict[str, torch.Tensor]) -> pd.DataFrame:
+    """
+    Removes batch effects from embeddings while preserving target variable effects.
+    All variables (target and batch) are assumed to be numerical tensors.
+
+    Args:
+        embeddings: A DataFrame where each row is a sample and each column is a dimension of the embeddings.
+        target_variables: A dictionary where keys are target variable names and values are 1D tensors of target variable values.
+        batch_variables: A dictionary where keys are batch variable names and values are 1D tensors of batch variable values.
+
+    Returns:
+        A DataFrame with the same structure as embeddings but with batch effects removed.
+    """
+    corrected_embeddings = embeddings.copy()
+
+    for column in embeddings.columns:
+        # Fit a linear regression model with target variables only
+        target_predictors = np.column_stack([var_values.numpy() for var_values in target_variables.values()])
+        target_model = LinearRegression()
+        target_model.fit(target_predictors, embeddings[column].values)
+
+        # Get residuals from the target variables model
+        target_effects = target_model.predict(target_predictors)
+        residuals = embeddings[column].values - target_effects
+
+        # Fit a new linear regression model with batch variables on residuals
+        batch_predictors = np.column_stack([var_values.numpy() for var_values in batch_variables.values()])
+        batch_model = LinearRegression()
+        batch_model.fit(batch_predictors, residuals)
+
+        # Calculate the batch effects and subtract them from the residuals
+        batch_effects = batch_model.predict(batch_predictors)
+        corrected_residuals = residuals - batch_effects
+
+        # Add back the target effects to get the corrected embeddings
+        corrected_embeddings[column] = target_effects + corrected_residuals
+
+    return corrected_embeddings
+
+
+def apply_batch_correction(embeddings: pd.DataFrame, transformation_models: Dict[str, LinearRegression]) -> pd.DataFrame:
+    """
+    Applies learned transformation models to a new set of embeddings to correct batch effects.
+    First run remove_batch_effects on training_dataset and then use the output to transform test dataset embeddings
+
+    Args:
+        embeddings: A DataFrame where each row is a sample and each column is a dimension of the embeddings.
+        transformation_models: A dictionary where keys are names of embedding dimensions and values are linear regression models that transform initial embeddings to corrected embeddings.
+
+    Returns:
+        A DataFrame with the same structure as embeddings but with batch effects corrected.
+    """
+    corrected_embeddings = embeddings.copy()
+
+    for column, model in transformation_models.items():
+        # Apply the transformation model to the corresponding embedding dimension
+        if column in corrected_embeddings.columns:
+            corrected_embeddings[column] = model.predict(embeddings[column].values.reshape(-1, 1))
+        else:
+            print(f"Warning: transformation model for '{column}' cannot be applied as this column is not in the provided embeddings.")
+
+    return corrected_embeddings

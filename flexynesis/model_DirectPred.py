@@ -13,7 +13,7 @@ from functools import reduce
 from captum.attr import IntegratedGradients
 
 from .models_shared import *
-
+from .utils import remove_batch_effects
 
 
 class DirectPred(pl.LightningModule):
@@ -23,7 +23,7 @@ class DirectPred(pl.LightningModule):
         self.dataset = dataset
         self.target_variables = target_variables
         self.batch_variables = batch_variables
-        self.variables = target_variables + batch_variables if batch_variables else target_variables
+        self.variables = target_variables #target_variables + batch_variables if batch_variables else target_variables
         self.val_size = val_size
         self.dat_train, self.dat_val = self.prepare_data()
         
@@ -224,7 +224,7 @@ class DirectPred(pl.LightningModule):
         # Converting tensor to numpy array and then to DataFrame
         embeddings_df = pd.DataFrame(embeddings_concat.detach().numpy(), 
                                      index=dataset.samples,
-                                     columns=[f"E{dim}" for dim in range(embeddings_concat.shape[1])])
+                                     columns=[f"E{dim}" for dim in range(embeddings_concat.shape[1])])        
         return embeddings_df
         
     # Adaptor forward function for captum integrated gradients. 
