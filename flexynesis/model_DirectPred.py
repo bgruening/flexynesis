@@ -25,7 +25,8 @@ class DirectPred(pl.LightningModule):
         self.variables = target_variables + batch_variables if batch_variables else target_variables
         self.val_size = val_size
         self.dat_train, self.dat_val = self.prepare_data()
-        
+        self.weights = {var: 10 if var in self.target_variables else -1 for var in self.variables}
+
         layers = list(dataset.dat.keys())
         input_dims = [len(dataset.features[layers[i]]) for i in range(len(layers))]
         
@@ -72,7 +73,6 @@ class DirectPred(pl.LightningModule):
         return outputs
 
     
-    
     def configure_optimizers(self):
         """
         Configure the optimizers for the DirectPred model.
@@ -98,43 +98,6 @@ class DirectPred(pl.LightningModule):
             if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
                 y_hat = y_hat[valid_indices]
                 y = y[valid_indices]
-
-                loss = F.mse_loss(torch.flatten(y_hat), y.float())
-                if self.batch_variables is not None and var in self.batch_variables:
-                    y_shuffled = y[torch.randperm(len(y))]
-                    # compute the difference between prediction error 
-                    # when using actual labels and shuffled labels 
-                    loss_shuffled = F.mse_loss(torch.flatten(y_hat), y_shuffled.float())
-                    loss = torch.abs(loss - loss_shuffled)
-            else:
-                loss = 0 # if no valid labels, set loss to 0
-        else:
-            # Ignore instances with missing labels for categorical variables
-            # Assuming that missing values were encoded as -1
-            valid_indices = (y != -1) & (~torch.isnan(y))
-            if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
-                y_hat = y_hat[valid_indices]
-                y = y[valid_indices]
-                loss = F.cross_entropy(y_hat, y.long())
-
-                if self.batch_variables is not None and var in self.batch_variables:
-                    y_shuffled = y[torch.randperm(len(y))]
-                    # compute the difference between prediction error 
-                    # when using actual labels and shuffled labels 
-                    loss_shuffled = F.cross_entropy(y_hat, y_shuffled.long())
-                    loss = torch.abs(loss - loss_shuffled) 
-            else: 
-                loss = 0
-        return loss
-
-    def compute_loss2(self, var, y, y_hat):
-        if self.dataset.variable_types[var] == 'numerical':
-            # Ignore instances with missing labels for numerical variables
-            valid_indices = ~torch.isnan(y)
-            if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
-                y_hat = y_hat[valid_indices]
-                y = y[valid_indices]
-
                 loss = F.mse_loss(torch.flatten(y_hat), y.float())
             else:
                 loss = 0 # if no valid labels, set loss to 0
@@ -156,38 +119,17 @@ class DirectPred(pl.LightningModule):
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
 
-        total_loss = 0
         losses = {}
-
-        total_loss = 0
-        target_loss = 0
-        batch_loss = 0
-
         for var in self.variables:
             y_hat = outputs[var]
             y = y_dict[var]
-            loss = self.compute_loss2(var, y, y_hat)
-
-            if self.batch_variables is not None and var in self.batch_variables:
-                # Compute a "randomness" loss for batch variables
-                y_shuffled = y[torch.randperm(len(y))]
-
-                if self.dataset.variable_types[var] == 'numerical':
-                    loss_shuffled = F.mse_loss(torch.flatten(y_hat), y_shuffled.float())
-                else: 
-                    loss_shuffled = F.cross_entropy(y_hat, y_shuffled.long())
-
-                # penalize as much as the predictions deviate from random 
-                loss_shuffled = torch.abs(loss - loss_shuffled)
-                total_loss += loss_shuffled
-                batch_loss += loss_shuffled
-            else:
-                total_loss += loss
-                target_loss += loss
-
-            # Store each individual loss to use it later for individual MLP's gradient computation
+            loss = self.compute_loss(var, y, y_hat)
+            # Store each individual loss 
             losses[var] = loss
-
+        
+        total_loss = 0.0
+        for var, loss in losses.items():
+            total_loss += self.weights[var] * loss
         
        # Compute gradients and update the parameters for the encoders
         self.encoder_optimizer.zero_grad()  # zero the gradients of the encoder optimizer
@@ -199,14 +141,16 @@ class DirectPred(pl.LightningModule):
             optimizer.zero_grad()  # zero the gradients of the current MLP
             self.manual_backward(losses[var], retain_graph=True)  # compute gradients based on the individual loss
             optimizer.step()  # update the parameters of the current MLP
-
-        losses['train_loss'] = total_loss
-        losses['target_loss'] = target_loss
-        losses['batch_loss'] = batch_loss
         
         self.encoder_optimizer.step()  # update the parameters of the encoders
         
-        self.log_dict(losses, on_step=False, on_epoch=True, prog_bar=True)
+        # log the weighted values of the losses
+        weighted_losses = {}
+        for var, loss in losses.items():
+            weighted_losses[var] = self.weights[var] * loss
+        weighted_losses['train_loss'] = total_loss
+        
+        self.log_dict(weighted_losses, on_step=False, on_epoch=True, prog_bar=True)
         return total_loss
 
 
@@ -217,19 +161,19 @@ class DirectPred(pl.LightningModule):
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
 
-        total_loss = 0
         losses = {}
         for var in self.variables:
             y_hat = outputs[var]
             y = y_dict[var]
+            loss = self.compute_loss(var, y, y_hat)
+            losses[var] = loss
 
-            loss = self.compute_loss2(var, y, y_hat)
-            total_loss += loss
-
-            #losses['_'.join(['val', var])] = loss
-
+        total_loss = 0
+        for var, loss in losses.items():
+            total_loss += self.weights[var] * loss
         losses['val_loss'] = total_loss
-        self.log_dict(losses, on_step=True, on_epoch=True, prog_bar=True)
+        
+        self.log_dict(losses, on_step=False, on_epoch=True, prog_bar=True)
 
         return total_loss
 
