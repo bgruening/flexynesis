@@ -23,7 +23,7 @@ class DirectPred(pl.LightningModule):
         self.dataset = dataset
         self.target_variables = target_variables
         self.batch_variables = batch_variables
-        self.variables = target_variables #target_variables + batch_variables if batch_variables else target_variables
+        self.variables = target_variables + batch_variables if batch_variables else target_variables
         self.val_size = val_size
         self.dat_train, self.dat_val = self.prepare_data()
         
@@ -36,7 +36,7 @@ class DirectPred(pl.LightningModule):
                 output_dim=self.config['latent_dim']) for i in range(len(layers))])
 
         self.MLPs = nn.ModuleDict() # using ModuleDict to store multiple MLPs
-        for var in self.variables:
+        for var in self.target_variables:
             if self.dataset.variable_types[var] == 'numerical':
                 num_class = 1
             else:
@@ -85,14 +85,7 @@ class DirectPred(pl.LightningModule):
             if valid_indices.sum() > 0:  # only calculate loss if there are valid targets
                 y_hat = y_hat[valid_indices]
                 y = y[valid_indices]
-
                 loss = F.mse_loss(torch.flatten(y_hat), y.float())
-                if self.batch_variables is not None and var in self.batch_variables:
-                    y_shuffled = y[torch.randperm(len(y))]
-                    # compute the difference between prediction error 
-                    # when using actual labels and shuffled labels 
-                    loss_shuffled = F.mse_loss(torch.flatten(y_hat), y_shuffled.float())
-                    loss = torch.abs(loss - loss_shuffled)
             else:
                 loss = 0 # if no valid labels, set loss to 0
         else:
@@ -103,13 +96,6 @@ class DirectPred(pl.LightningModule):
                 y_hat = y_hat[valid_indices]
                 y = y[valid_indices]
                 loss = F.cross_entropy(y_hat, y.long())
-
-                if self.batch_variables is not None and var in self.batch_variables:
-                    y_shuffled = y[torch.randperm(len(y))]
-                    # compute the difference between prediction error 
-                    # when using actual labels and shuffled labels 
-                    loss_shuffled = F.cross_entropy(y_hat, y_shuffled.long())
-                    loss = torch.abs(loss - loss_shuffled) 
             else: 
                 loss = 0
         return loss
@@ -129,13 +115,12 @@ class DirectPred(pl.LightningModule):
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
         total_loss = 0        
-        for var in self.variables:
+        for var in self.target_variables:
             y_hat = outputs[var]
             y = y_dict[var]
-
             loss = self.compute_loss(var, y, y_hat)
-            self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
             total_loss += loss            
+        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         return total_loss
 
     
@@ -155,13 +140,13 @@ class DirectPred(pl.LightningModule):
         x_list = [dat[x] for x in layers]
         outputs = self.forward(x_list)
         total_loss = 0        
-        for var in self.variables:
+        for var in self.target_variables:
             y_hat = outputs[var]
             y = y_dict[var]
 
             loss = self.compute_loss(var, y, y_hat)
-            self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-            total_loss += loss            
+            total_loss += loss   
+        self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True)
         return total_loss
 
     
@@ -194,7 +179,7 @@ class DirectPred(pl.LightningModule):
         outputs = self.forward(x_list)
 
         predictions = {}
-        for var in self.variables:
+        for var in self.target_variables:
             y_pred = outputs[var].detach().numpy()
             if self.dataset.variable_types[var] == 'categorical':
                 predictions[var] = np.argmax(y_pred, axis=1)
