@@ -254,22 +254,31 @@ class DirectPred(pl.LightningModule):
             outputs_list.append(out[target_var])
         return torch.cat(outputs_list, dim = 0)
 
-    def compute_feature_importance(self, dataset, target_var, steps=5, batch_size = 64):
+    def compute_feature_importance(self, dataset, target_var, steps=5, batch_size = 16):
+        def bytes_to_gb(bytes):
+            return bytes / 1024 ** 2
+        print("Memory before copying model to cpu {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
+        self.to('cpu')
+        print("Memory before copying model to gpu {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
         device = torch.device("cuda" if self.device_type == 'gpu' and torch.cuda.is_available() else 'cpu')
         self.to(device)
 
+        print("Memory before defining data loader {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
         ig = IntegratedGradients(self.forward_target)
+        print("Memory after data loader {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
 
         if dataset.variable_types[target_var] == 'numerical':
             num_class = 1
         else:
             num_class = len(np.unique([y[target_var] for _, y in dataset]))
 
+        print("Memory before batch processing: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
         aggregated_attributions = [[] for _ in range(num_class)]
         for batch in dataloader:
             dat, _ = batch
             x_list = [dat[x].to(device) for x in dat.keys()]
+            print("Memory after moving xs to GPU: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
             input_data = tuple([data.unsqueeze(0).requires_grad_() for data in x_list])
             baseline = tuple(torch.zeros_like(x) for x in input_data)
             if num_class == 1:
@@ -285,6 +294,13 @@ class DirectPred(pl.LightningModule):
                                                  additional_forward_args=(target_var, steps), 
                                                  target=target_class, n_steps=steps)
                     aggregated_attributions[target_class].append(attributions)
+            del x_list  # Explicitly delete if not needed anymore
+            print("Memory after deleting xs: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
+            torch.cuda.empty_cache()
+            print("Memory after emptying cache {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
+
+        torch.cuda.empty_cache()
+        print("Memory after batch processing: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
 
         # For each target class and for each data modality/layer, concatenate attributions accross batches 
         layers = list(dataset.dat.keys())

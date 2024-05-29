@@ -57,7 +57,7 @@ class DirectPredGCNN(pl.LightningModule):
                 self.log_vars[var] = nn.Parameter(torch.zeros(1))
 
         # Init modality encoders
-        self.layers = list(dataset.dat.keys())
+        self.layers = dataset.layers
         # NOTE: For now we use matrices, so number of node input features is 1.
         input_dims = [1 for _ in range(len(self.layers))]
         
@@ -191,53 +191,62 @@ class DirectPredGCNN(pl.LightningModule):
 
 
     def predict(self, dataset):
-        self.eval()
-        xs = [x for x in dataset.dat.values()]
-        edge_indices = [dataset.feature_ann[k]["edge_index"] for k in self.layers]
-        inputs = []
-        for x, edge_idx in zip(xs, edge_indices):
-            inputs.append(
-                Batch.from_data_list(
-                    [Data(x=sample.unsqueeze(1) if sample.ndim == 1 else sample, edge_index=edge_idx) for sample in x]
-                )
-            )
-        outputs = self.forward(inputs)
+        self.eval()  # Ensure the model is in evaluation mode
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
 
-        predictions = {}
-        for var in self.variables:
-            y_pred = outputs[var].detach().numpy()
-            if self.variable_types[var] == "categorical":
-                predictions[var] = np.argmax(y_pred, axis=1)
-            else:
-                predictions[var] = y_pred
-        return predictions
+        all_predictions = {var: [] for var in self.variables}  # Dictionary to store predictions for each variable
+
+        for batch in dataloader:
+            (dat, ydict), idx = batch 
+            layers = dat.keys()
+            x_list = [dat[x] for x in layers]
+            outputs = self.forward(x_list)  # Perform forward pass with the batch
+
+            # Process each variable's predictions
+            for var in self.variables:
+                y_pred = outputs[var].detach().cpu().numpy()  # Detach and move to CPU
+                if self.variable_types[var] == "categorical":
+                    # For categorical, take argmax to classify
+                    predictions = np.argmax(y_pred, axis=1)
+                else:
+                    # For continuous, use the predictions directly
+                    predictions = y_pred
+                all_predictions[var].append(predictions)
+
+        # Concatenate all batch predictions for each variable
+        final_predictions = {var: np.concatenate(all_predictions[var]) for var in self.variables}
+
+        return final_predictions
 
     def transform(self, dataset):
-        self.eval()
+        self.eval()  # Ensure the model is in evaluation mode
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
 
-        xs = [x for x in dataset.dat.values()]
-        edge_indices = [dataset.feature_ann[k]["edge_index"] for k in self.layers]
-        inputs = []
-        for x, edge_idx in zip(xs, edge_indices):
-            inputs.append(
-                Batch.from_data_list(
-                    [Data(x=sample.unsqueeze(1) if sample.ndim == 1 else sample, edge_index=edge_idx) for sample in x]
-                )
-            )
+        all_embeddings = []  # List to store embeddings from all batches
 
-        embeddings_list = []
-        # Process each input matrix with its corresponding Encoder
-        for i, x in enumerate(inputs):
-            embeddings_list.append(self.encoders[i](x.x, x.edge_index, x.batch))
-        embeddings_concat = torch.cat(embeddings_list, dim=1)
+        for batch in dataloader:
+            (dat, ydict), idx = batch 
+            layers = dat.keys()
+            inputs = [dat[x] for x in layers]
+            # Process each input matrix with its corresponding Encoder
+            batch_embeddings_list = []
+            for i, input_data in enumerate(inputs):
+                encoder_output = self.encoders[i](input_data.x, input_data.edge_index, input_data.batch)
+                batch_embeddings_list.append(encoder_output)
 
-        # Converting tensor to numpy array and then to DataFrame
+            # Concatenate embeddings from the current batch
+            embeddings_concat = torch.cat(batch_embeddings_list, dim=1)
+            all_embeddings.append(embeddings_concat.detach().cpu().numpy())  # Detach and move to CPU
+
+        # Concatenate all batch embeddings and convert to DataFrame
+        final_embeddings = np.concatenate(all_embeddings, axis=0)
         embeddings_df = pd.DataFrame(
-            embeddings_concat.detach().numpy(),
-            index=dataset.samples,
-            columns=[f"E{dim}" for dim in range(embeddings_concat.shape[1])],
+            final_embeddings,
+            index=[sample for batch in dataloader for sample in batch.samples],  # Assuming 'samples' is attribute or defined
+            columns=[f"E{dim}" for dim in range(final_embeddings.shape[1])]
         )
         return embeddings_df
+
 
     def model_forward(self, *args):
         xs = list(args[:-2])
@@ -252,7 +261,7 @@ class DirectPredGCNN(pl.LightningModule):
             )
         return self.forward(inputs)[target_var]
 
-    def compute_feature_importance(self, dataset, target_var, steps=5, batch_size = 32):
+    def compute_feature_importance(self, dataset, target_var, steps=5, batch_size = 24):
         # find out the device the model was trained on.
         device = torch.device("cuda" if self.device_type == 'gpu' and torch.cuda.is_available() else 'cpu')
         self.to(device)
@@ -262,11 +271,13 @@ class DirectPredGCNN(pl.LightningModule):
         
         print("[INFO] Computing feature importance for variable:",target_var,"on device:",device)
 
+        print("Memory before defining data loader {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
         # notice the DataLoader comes from torch_geometric.loader
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        print("Memory after data loader {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
 
         ig = IntegratedGradients(self.model_forward)
-
+        
         # Get the number of classes for the target variable
         if dataset.variable_types[target_var] == "numerical":
             num_class = 1
@@ -279,13 +290,13 @@ class DirectPredGCNN(pl.LightningModule):
         for batch in dataloader:
             (dat, ydict), idx = batch
             print("processing ",len(idx),"samples in batch")
-            subset = dataset[idx]
-            
             # Prepare inputs and baselines, moving them to the GPU
-            xs = [x.to(device) for x in subset.dat.values()]
+            # restore original data shape 
+            xs = [dat[k].x.reshape(len(idx), int(dat[k].x.shape[0]/len(idx))) for k in dat.keys()]
+            xs = [x.to(device) for x in xs]
             
             print("Memory after moving xs to GPU: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
-            edge_indices = [subset.feature_ann[k]["edge_index"].to(device) for k in subset.dat.keys()]
+            edge_indices = [dat[k].edge_index.to(device) for k in dat.keys()]
             print("Memory after moving edges to GPU: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
             
             inputs = tuple(xs)
@@ -299,14 +310,14 @@ class DirectPredGCNN(pl.LightningModule):
             print("Memory after clearing cache: {:.3f} MB".format(bytes_to_gb(torch.cuda.max_memory_reserved())))
 
             
-            #internal_batch_size = inputs[0].shape[0]
-            #print("Internal batch size:",internal_batch_size)
+            internal_batch_size = len(idx)
+            print("Internal batch size:",internal_batch_size)
             if num_class == 1:
                 # returns a tuple of tensors (one per data modality)
                 attributions = ig.attribute(inputs, baselines,
                                             additional_forward_args=additional_forward_args,
-                                            n_steps=steps) 
-                                            #internal_batch_size = internal_batch_size)  
+                                            n_steps=steps,
+                                            internal_batch_size = internal_batch_size)  
                 aggregated_attributions[0].append(attributions)
             else:
                 for target_class in range(num_class):
@@ -315,12 +326,12 @@ class DirectPredGCNN(pl.LightningModule):
                             baselines,
                             additional_forward_args=additional_forward_args,
                             target=target_class,
-                            n_steps=steps) 
-                            #internal_batch_size = internal_batch_size)
+                            n_steps=steps,
+                            internal_batch_size = internal_batch_size)
                     aggregated_attributions[target_class].append(attributions)
 
         # For each target class and for each data modality/layer, concatenate attributions accross batches 
-        layers = list(dataset.dat.keys())
+        layers = self.layers
         num_layers = len(layers)
         processed_attributions = [] 
         # Process each class
@@ -332,7 +343,7 @@ class DirectPredGCNN(pl.LightningModule):
                 # Extract all batch tensors for this layer across all batches for the current class
                 layer_tensors = [batch_attr[layer_idx] for batch_attr in class_attr]
                 # Concatenate tensors along the batch dimension
-                attr_concat = torch.cat(layer_tensors, dim=1)
+                attr_concat = torch.cat(layer_tensors, dim=0)
                 layer_attributions.append(attr_concat)
             processed_attributions.append(layer_attributions)
 

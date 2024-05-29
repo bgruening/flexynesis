@@ -455,40 +455,49 @@ class DataImporter:
         return normalized_data
     
     def get_torch_dataset(self, dat, ann, samples, feature_ann, force, subset=None):
-        # If not force and graph is there - load already preprocessed data.
-        if (not force) and (self.graph is not None):
-            if subset is None:
-                raise ValueError("train and test subsets cannot be stored in a same location!")
-            data_path_on_disk = os.path.join(self.processed_dir, subset)
-            print(f"[DATA IMPORTER] Using data from existing {data_path_on_disk} folder...")
-            return MultiOmicPYGDataset(data_path_on_disk)
+        if subset is None:
+            raise ValueError("Train and test subsets cannot be stored in the same location!")
+        data_path_on_disk = os.path.join(self.processed_dir, subset)
 
-        features = {x: dat[x].index for x in dat.keys()}
-        dat = {x: torch.from_numpy(np.array(dat[x].T)).float() for x in dat.keys()}
-
-        ann, variable_types, label_mappings = self.encode_labels(ann)
-
-        # Convert DataFrame to tensor
-        ann = {col: torch.from_numpy(ann[col].values) for col in ann.columns}
         if self.graph is None:
+            # Process data only if required for non-graph dataset
+            features = {x: dat[x].index for x in dat.keys()}
+            dat = {x: torch.from_numpy(np.array(dat[x].T)).float() for x in dat.keys()}
+            ann, variable_types, label_mappings = self.encode_labels(ann)
+            ann = {col: torch.from_numpy(ann[col].values) for col in ann.columns}
             return MultiomicDataset(dat, ann, variable_types, features, samples, label_mappings)
+
+        # Process graph data only if force re-creation is needed or if data does not exist
+        if force or not os.path.exists(data_path_on_disk):
+            print(f"[DATA IMPORTER] Processing and storing data at {data_path_on_disk}...")
+            shutil.rmtree(data_path_on_disk, ignore_errors=True)  # Clear existing data if necessary
+            os.makedirs(data_path_on_disk, exist_ok=True)
+
+            # Serialize data only when required
+            features = {x: dat[x].index for x in dat.keys()}
+            dat = {x: torch.from_numpy(np.array(dat[x].T)).float() for x in dat.keys()}
+            ann, variable_types, label_mappings = self.encode_labels(ann)
+            ann = {col: torch.from_numpy(ann[col].values) for col in ann.columns}
+
+            torch.save(dat, os.path.join(data_path_on_disk, 'dat.pt'))
+            torch.save(ann, os.path.join(data_path_on_disk, 'ann.pt'))
+            torch.save(samples, os.path.join(data_path_on_disk, 'samples.pt'))
+            torch.save(features, os.path.join(data_path_on_disk, 'features.pt'))
+            torch.save(variable_types, os.path.join(data_path_on_disk, 'variable_types.pt'))
+            torch.save(label_mappings, os.path.join(data_path_on_disk, 'label_mappings.pt'))
+            torch.save(feature_ann, os.path.join(data_path_on_disk, 'feature_ann.pt'))
+
+            dataset = MultiOmicPYGDataset(data_path_on_disk, transform=self.transform,
+                                          pre_transform=self.pre_transform, pre_filter=self.pre_filter)
+            dataset.process()
         else:
-            if subset is None:
-                raise ValueError("train and test subsets cannot be stored in a same location!")
+            print(f"[DATA IMPORTER] Using data from existing {data_path_on_disk} folder...")
+            dataset = MultiOmicPYGDataset(data_path_on_disk, transform=self.transform,
+                                          pre_transform=self.pre_transform, pre_filter=self.pre_filter)
 
-            data_path_on_disk = os.path.join(self.processed_dir, subset)
-
-            print(f"[DATA IMPORTER] Removing data from existing {data_path_on_disk} folder...")
-            shutil.rmtree(data_path_on_disk, ignore_errors=True)
-            return MultiOmicPYGDataset(
-                data_path_on_disk,
-                dat, ann,
-                variable_types, features, samples, label_mappings,
-                feature_ann,
-                transform=self.transform,
-                pre_transform=self.pre_transform,
-                pre_filter=self.pre_filter,
-            )
+        return dataset
+        
+        
 
     def encode_labels(self, df):
         label_mappings = {}
@@ -715,7 +724,95 @@ class TripletMultiOmicDataset(Dataset):
         return labels_set, label_to_indices
 
 
+
 class MultiOmicPYGDataset(PYGDataset):
+
+    required = ["variable_types", "features", "samples", "label_mappings", "feature_ann", "ann"]
+
+    def __init__(
+        self,
+        root,
+        variable_types=None,
+        features=None,
+        samples=None,
+        label_mappings=None,
+        feature_ann=None,
+        ann = None,
+        layers = None,
+        transform=None,
+        pre_transform=None,
+        pre_filter=None,
+        sample_indices=None 
+    ):
+        self.variable_types = variable_types
+        self.features = features
+        self.samples = samples
+        self.label_mappings = label_mappings
+        self.feature_ann = feature_ann
+        self.ann = ann
+        for attr in self.required:
+            if getattr(self, attr) is None:
+                setattr(self, attr, torch.load(os.path.join(root, f"{attr}.pt")))
+        self.layers = layers 
+        super().__init__(root, transform, pre_transform, pre_filter)
+
+    def process(self):
+        if not os.path.exists(self.processed_dir):
+            os.makedirs(self.processed_dir)
+        
+        dat = torch.load(os.path.join(self.root, 'dat.pt'))
+        self.layers = list(dat.keys())
+
+        for idx in range(len(self.samples)):
+            subset_dat = {}
+            for k, v in dat.items():
+                x = v[idx]
+                if x.ndim == 1:
+                    x = x.unsqueeze(1)
+                edge_index = self.feature_ann[k]["edge_index"]
+                data = Data(x=x, edge_index=edge_index)
+                if self.pre_filter is not None and not self.pre_filter(data):
+                    continue
+                if self.pre_transform is not None:
+                    data = self.pre_transform(data)
+                subset_dat[k] = data
+            subset_ann = {k: self.ann[k][idx] for k in self.ann.keys()}
+            torch.save((subset_dat, subset_ann), os.path.join(self.processed_dir, f"data_{idx}.pt"))
+    
+    @property
+    def processed_file_names(self):
+        # Generate file names for each sample
+        sample_files = [f"data_{i}.pt" for i in range(len(self.samples))]
+        # Generate file names for each required metadata or component
+        required_files = [f"{f}.pt" for f in self.required]
+        # Return combined list of all required files
+        return sample_files + required_files
+
+    def get(self, idx):
+        # Load a data sample by index
+        data_path = os.path.join(self.processed_dir, f"data_{idx}.pt")
+        data = torch.load(data_path)
+        # Return the data processed by any transforms
+        if self.transform is not None:
+            data = self.transform(data)
+        return data, idx
+
+    def __getitem__(self, idx):
+        return self.get(idx)
+
+
+    def len(self):
+        return len(self.samples)
+    
+    def get_dataset_stats(self):
+        stats = {}
+        stats |= {"feature_count in: " + k: v.x.size(0) for k, v in self[0][0][0].items()}
+        stats |= {"n_edges in: " + k: v.edge_index.size(1) for k, v in self[0][0][0].items()}
+        stats["sample_count"] = len(self)
+        return stats
+    
+    
+class MultiOmicPYGDataset_ori(PYGDataset):
     required = ["variable_types", "features", "samples", "label_mappings", "feature_ann"]
 
     def __init__(
@@ -731,6 +828,7 @@ class MultiOmicPYGDataset(PYGDataset):
         transform=None,
         pre_transform=None,
         pre_filter=None,
+        sample_indices=None 
     ):
         self.dat = dat
         self.ann = ann
@@ -739,6 +837,7 @@ class MultiOmicPYGDataset(PYGDataset):
         self.samples = samples
         self.label_mappings = label_mappings
         self.feature_ann = feature_ann
+        self.sample_indices = list(range(len(samples))) if sample_indices is None else sample_indices
         for attr in self.required:
             if getattr(self, attr) is None:
                 setattr(self, attr, torch.load(os.path.join(root, "processed", f"{attr}.pt")))
@@ -787,16 +886,44 @@ class MultiOmicPYGDataset(PYGDataset):
     def len(self):
         return len(self.processed_file_names) - len(self.required)
 
-    def get(self, idx):
-        data = torch.load(os.path.join(self.processed_dir, f"data_{idx}.pt"))
-        return data, idx
-
     def get_dataset_stats(self):
         stats = {}
         stats |= {"feature_count in: " + k: v.x.size(0) for k, v in self[0][0][0].items()}
         stats |= {"n_edges in: " + k: v.edge_index.size(1) for k, v in self[0][0][0].items()}
         stats["sample_count"] = len(self)
         return stats
+    
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()  # Convert tensor of indices to a list
+
+        if isinstance(idx, list):
+            # Handling list of indices to create a subset dataset
+            new_indices = [self.sample_indices[i] for i in idx]  # Subset the internal indices list
+            return MultiOmicPYGDataset(
+                self.root,
+                dat={k: v[idx] for k, v in self.dat.items()},
+                ann={k: v[idx] for k, v in self.ann.items()},
+                variable_types=self.variable_types,
+                features=self.features,
+                samples=[self.samples[i] for i in idx],
+                label_mappings=self.label_mappings,
+                feature_ann=self.feature_ann,
+                transform=self.transform,
+                pre_transform=self.pre_transform,
+                pre_filter=self.pre_filter,
+                sample_indices=new_indices
+            )
+        elif isinstance(idx, int):
+            # Single index access
+            actual_idx = self.sample_indices[idx]
+            return self.get(actual_idx)
+
+    def get(self, idx):
+        data_path = os.path.join(self.processed_dir, f"data_{idx}.pt")
+        data = torch.load(data_path)
+        return data, idx
+
 
 
 class STRING(PYGDataset):
