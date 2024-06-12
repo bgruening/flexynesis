@@ -12,28 +12,6 @@ Usage
 .. image:: https://github.com/BIMSBbioinfo/flexynesis/actions/workflows/benchmarks.yml/badge.svg
 .. image:: https://github.com/BIMSBbioinfo/flexynesis/actions/workflows/tutorials.yml/badge.svg
 
-flexynesis
-===========
-
-A deep-learning based multi-omics bulk sequencing data integration suite with a focus on (pre-)clinical 
-endpoint prediction. The package includes multiple types of deep learning architectures such as simple 
-fully connected networks, supervised variational autoencoders; different options of data layer fusion, 
-and automates feature selection and hyperparameter optimisation. The tools are continuously benchmarked 
-on publicly available datasets mostly related to the study of cancer. Some of the applications of the methods 
-we develop are drug response modeling in cancer patients or preclinical models (such as cell lines and 
-patient-derived xenografts), cancer subtype prediction, or any other clinically relevant outcome prediction
-that can be formulated as a regression or classification problem. 
-
-.. raw:: html
-   <p align="center">
-     <img alt="workflow" src="https://github.com/BIMSBbioinfo/flexynesis/raw/main/img/graphical_abstract.jpg">
-   </p>
-
-Documentation
-=============
-
-A detailed documentation of classes and functions in this repository can be found `here <https://bimsbstatic.mdc-berlin.de/akalin/buyar/flexynesis/docs/flexynesis/index.html>`_.
-
 Benchmarks
 ==========
 
@@ -246,11 +224,3 @@ The output from papermill can be converted to an html file as follows:
 .. code-block:: bash
 
     jupyter nbconvert --to html brca_subtypes.ipynb 
-
-Documentation
-=============
-
-.. code-block:: bash
-
-    pdoc --html --output-dir docs --force flexynesis 
-
