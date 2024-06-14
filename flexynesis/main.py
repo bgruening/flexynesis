@@ -28,23 +28,27 @@ class HyperparameterTuning:
     This class provides functionalities to perform hyperparameter tuning using Bayesian optimization.
     It supports various features like live loss plotting, early stopping, and custom configuration loading.
 
-    Attributes:
-        dataset: Dataset used for training and validation.
-        model_class: The class of the model to be tuned.
-        target_variables: List of target variables for the model.
-        batch_variables: List of batch variables, if applicable.
-        config_name: Name of the configuration for tuning parameters.
-        n_iter: Number of iterations for the tuning process.
-        plot_losses: Boolean flag to plot losses during training.
-        cv_splits: Number of cross-validation folds.
-        use_loss_weighting: Flag to use loss weighting during training.
-        early_stop_patience: Number of epochs to wait for improvement before stopping.
-        device_type: Str (cpu, gpu)
     Methods:
-        objective(params, current_step, total_steps): Evaluates a set of parameters.
-        perform_tuning(): Executes the hyperparameter tuning process.
-        init_early_stopping(): Initializes early stopping mechanism.
-        load_and_convert_config(config_path): Loads and converts a configuration file.
+        __init__(dataset, model_class, config_name, target_variables, batch_variables=None, surv_event_var=None, surv_time_var=None, n_iter=10, config_path=None, plot_losses=False, val_size=0.2, use_cv=False, cv_splits=5, use_loss_weighting=True, early_stop_patience=-1, device_type=None, gnn_conv_type=None, input_layers=None, output_layers=None):
+            Initializes the HyperparameterTuning instance with given parameters.
+
+        get_batch_space(min_size=16, max_size=256):
+            Creates a batch size search space based on dataset size.
+
+        setup_trainer(params, current_step, total_steps, full_train=False):
+            Configures callbacks and trainer for the current fold.
+
+        objective(params, current_step, total_steps, full_train=False):
+            Evaluates a set of parameters.
+
+        perform_tuning(hpo_patience=0):
+            Executes the hyperparameter tuning process.
+
+        init_early_stopping():
+            Initializes the early stopping mechanism.
+
+        load_and_convert_config(config_path):
+            Loads and converts a configuration file.
     """
     def __init__(self, dataset, model_class, config_name, target_variables, 
                  batch_variables = None, surv_event_var = None, surv_time_var = None, 
@@ -53,6 +57,49 @@ class HyperparameterTuning:
                  use_loss_weighting = True, early_stop_patience = -1,
                  device_type = None, gnn_conv_type = None, 
                  input_layers = None, output_layers = None):
+        """
+        Initializes the HyperparameterTuning instance with given parameters.
+
+        :param dataset: Dataset used for training and validation.
+        :type dataset: Dataset
+        :param model_class: The class of the model to be tuned.
+        :type model_class: type
+        :param config_name: Name of the configuration for tuning parameters.
+        :type config_name: str
+        :param target_variables: List of target variables for the model.
+        :type target_variables: list
+        :param batch_variables: List of batch variables, if applicable.
+        :type batch_variables: list, optional
+        :param surv_event_var: Variable name for survival event.
+        :type surv_event_var: str, optional
+        :param surv_time_var: Variable name for survival time.
+        :type surv_time_var: str, optional
+        :param n_iter: Number of iterations for the tuning process. Default is 10.
+        :type n_iter: int, optional
+        :param config_path: Path to the configuration file.
+        :type config_path: str, optional
+        :param plot_losses: Boolean flag to plot losses during training. Default is False.
+        :type plot_losses: bool, optional
+        :param val_size: Validation set size ratio. Default is 0.2.
+        :type val_size: float, optional
+        :param use_cv: Flag to use cross-validation. Default is False.
+        :type use_cv: bool, optional
+        :param cv_splits: Number of cross-validation folds. Default is 5.
+        :type cv_splits: int, optional
+        :param use_loss_weighting: Flag to use loss weighting during training. Default is True.
+        :type use_loss_weighting: bool, optional
+        :param early_stop_patience: Number of epochs to wait for improvement before stopping. Default is -1.
+        :type early_stop_patience: int, optional
+        :param device_type: Device type for training ('cpu' or 'gpu'). Default is None.
+        :type device_type: str, optional
+        :param gnn_conv_type: Type of GNN convolution. Default is None.
+        :type gnn_conv_type: str, optional
+        :param input_layers: List of input layers. Default is None.
+        :type input_layers: list, optional
+        :param output_layers: List of output layers. Default is None.
+        :type output_layers: list, optional
+        """
+
         self.dataset = dataset # dataset for model initiation
         self.loader_dataset = dataset # dataset for defining data loaders (this can be model specific)
         self.model_class = model_class
@@ -104,6 +151,17 @@ class HyperparameterTuning:
                 raise ValueError(f"'{self.config_name}' not found in the default config.")
 
     def get_batch_space(self, min_size = 16, max_size = 256):
+        """
+        Creates a batch size search space based on dataset size.
+
+        :param min_size: Minimum batch size. Default is 16.
+        :type min_size: int, optional
+        :param max_size: Maximum batch size. Default is 256.
+        :type max_size: int, optional
+
+        :return: Batch size search space.
+        :rtype: skopt.space.Categorical
+        """
         m = int(np.log2(len(self.dataset) * 0.8))
         st = int(np.log2(min_size))
         end = int(np.log2(max_size))
@@ -113,6 +171,21 @@ class HyperparameterTuning:
         return s
     
     def setup_trainer(self, params, current_step, total_steps, full_train = False):
+        """
+        Configures callbacks and trainer for the current fold.
+
+        :param params: Dictionary of parameters.
+        :type params: dict
+        :param current_step: Current step in the tuning process.
+        :type current_step: int
+        :param total_steps: Total number of steps in the tuning process.
+        :type total_steps: int
+        :param full_train: Flag to indicate if training on the full dataset. Default is False.
+        :type full_train: bool, optional
+
+        :return: Trainer and early stopping callback.
+        :rtype: tuple
+        """
         # Configure callbacks and trainer for the current fold
         mycallbacks = [self.progress_bar]
         if self.plot_losses:
@@ -137,6 +210,21 @@ class HyperparameterTuning:
         return trainer, early_stop_callback
     
     def objective(self, params, current_step, total_steps, full_train = False):
+        """
+        Evaluates a set of parameters.
+
+        :param params: Dictionary of parameters.
+        :type params: dict
+        :param current_step: Current step in the tuning process.
+        :type current_step: int
+        :param total_steps: Total number of steps in the tuning process.
+        :type total_steps: int
+        :param full_train: Flag to indicate if training on the full dataset. Default is False.
+        :type full_train: bool, optional
+
+        :return: Validation loss, average epochs, and model (if applicable).
+        :rtype: float or tuple
+        """
         # Unpack or construct specific model arguments
         model_args = {
             "config": params,
@@ -207,6 +295,15 @@ class HyperparameterTuning:
             return avg_val_loss, avg_epochs, model 
     
     def perform_tuning(self, hpo_patience = 0):
+        """
+        Executes the hyperparameter tuning process.
+
+        :param hpo_patience: Number of iterations without improvement before stopping. Default is 0.
+        :type hpo_patience: int, optional
+
+        :return: Best model and best parameters.
+        :rtype: tuple
+        """
         opt = Optimizer(dimensions=self.space, n_initial_points=10, acq_func="gp_hedge", acq_optimizer="auto")
 
         best_loss = np.inf
@@ -256,7 +353,12 @@ class HyperparameterTuning:
 
         return best_model, best_params_dict    
     def init_early_stopping(self):
-        """Initialize the early stopping callback."""
+        """
+        Initializes the early stopping mechanism.
+
+        :return: Early stopping callback.
+        :rtype: EarlyStopping
+        """
         return EarlyStopping(
             monitor='val_loss',
             patience=self.early_stop_patience,
@@ -265,6 +367,17 @@ class HyperparameterTuning:
         )
 
     def load_and_convert_config(self, config_path):
+        """
+        Loads and converts a configuration file.
+
+        :param config_path: Path to the configuration file.
+        :type config_path: str
+
+        :return: Converted configuration.
+        :rtype: dict
+
+        :raises ValueError: If the config file does not exist or is of an unsupported format.
+        """
         # Ensure the config file exists
         if not os.path.isfile(config_path):
             raise ValueError(f"Config file '{config_path}' doesn't exist.")
