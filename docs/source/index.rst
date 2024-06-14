@@ -1,19 +1,21 @@
-Welcome to Flexynesis documentation!
-===================================
+.. flexynesis documentation master file, created by
+   sphinx-quickstart on Fri Jun 14 18:08:25 2024.
+   You can adapt this file completely to your liking, but it should at least
+   contain the root `toctree` directive.
 
-Flexynesis is a deep-learning based multi-omics bulk sequencing data integration suite with a focus on (pre-)clinical
-endpoint prediction. The package includes multiple types of deep learning architectures such as simple
-fully connected networks, supervised variational autoencoders; different options of data layer fusion,
-and automates feature selection and hyperparameter optimisation. The tools are continuously benchmarked
-on publicly available datasets mostly related to the study of cancer. Some of the applications of the methods
-we develop are drug response modeling in cancer patients or preclinical models (such as cell lines and
-patient-derived xenografts), cancer subtype prediction, or any other clinically relevant outcome prediction
-that can be formulated as a regression or classification problem.
-
-Contents
---------
+Welcome to flexynesis's documentation!
+======================================
 
 .. toctree::
-
-   usage
+   :maxdepth: 2
+   :caption: Contents:
+ 
    api
+   
+
+Indices and tables
+==================
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
