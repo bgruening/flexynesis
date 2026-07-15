@@ -128,6 +128,12 @@ mkdocs build --clean
 
 For questions, suggestions, or collaborations: Open an [issue](https://github.com/BIMSBbioinfo/flexynesis/issues) or create a [discussion](https://github.com/BIMSBbioinfo/flexynesis/discussions).  
 
+# de.NBI Service
+
+<img src="img/denbi-logo-color.svg" alt="de.NBI logo" width="220">
+
+This is an approved de.NBI service. Please help us improve by taking our short [user survey](https://www.surveymonkey.de/r/denbi-service?sc=rbc&tool=flexynesis).
+
 # License 
 
 Flexynesis is released under a PolyForm Noncommercial License 1.0.0. 
