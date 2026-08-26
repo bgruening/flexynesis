@@ -1309,6 +1309,7 @@ def main():
         model, best_params = tuner.perform_tuning(hpo_patience=args.hpo_patience)
 
     # if fine-tuning is enabled; fine tune the model on a portion of test samples
+    finetune_dataset = None # Will capture the Finetunesamples for the predicted_label output
     if args.finetuning_samples > 0:
         from .main import FineTuner
 
@@ -1441,7 +1442,25 @@ def main():
                 ],
                 ignore_index=True,
             )
-        else:
+        elif finetune_dataset is not None:
+            predicted_labels = pd.concat(
+                [
+                    get_predicted_labels(
+                        model.predict(finetune_dataset),
+                        finetune_dataset,
+                        "finetune",
+                        args.model_class,
+                    ),
+                    get_predicted_labels(
+                        model.predict(test_dataset),
+                        test_dataset,
+                        "test",
+                        args.model_class,
+                    ),
+                ],
+                ignore_index=True,
+            )
+        else :
             predicted_labels = get_predicted_labels(
                 model.predict(test_dataset),
                 test_dataset,
