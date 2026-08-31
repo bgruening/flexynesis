@@ -359,8 +359,9 @@ def main():
       --hpo_iter (int):
         Number of hyperparameter optimization iterations. Default: `100`.
 
-      --finetuning_samples (int):
+      --finetuning_samples (int | str):
         Number of test samples used for fine-tuning; `0` disables. Default: `0`.
+        Or Path to a File that contains Sample_IDs inteded for  finetuning_samples
 
       --variance_threshold (float):
         Variance percentile threshold to drop low-variance features. Default: `1`.
@@ -588,10 +589,11 @@ def main():
     )
     parser.add_argument(
         "--finetuning_samples",
-        type=int,
+        type=lambda x: int(x) if x.isdigit() else x,
         default=0,
         help="Number of samples from the test dataset to use for fine-tuning the "
-        "model. Set to 0 to disable fine-tuning",
+        "model or Path to File with Sample IDs to use"
+        "Set to 0 to disable fine-tuning",
     )
     parser.add_argument(
         "--variance_threshold",
@@ -835,6 +837,9 @@ def main():
             )
         if not os.path.exists(args.artifacts):
             raise FileNotFoundError(f"--artifacts not found: {args.artifacts}")
+
+        if not isinstance(args.finetuning_samples, int) and not os.path.exists(args.pretrained_model):   # In case of finetune.  case sample ID file -> Check if file exist
+            raise FileNotFoundError(f"--finetunesamples Not int and File not found: {args.finetuning_samples}")
 
         # Handle device selection for inference (same logic as training)
         if args.use_gpu:
@@ -1310,20 +1315,47 @@ def main():
 
     # if fine-tuning is enabled; fine tune the model on a portion of test samples
     finetune_dataset = None # Will capture the Finetunesamples for the predicted_label output
-    if args.finetuning_samples > 0:
+    if args.finetuning_samples != 0:
         from .main import FineTuner
 
-        finetuneSampleN = args.finetuning_samples
-        print(
-            "[INFO] Finetuning the model on ",
-            finetuneSampleN,
-            "test samples",
-        )
-        # split test dataset into finetuning and holdout datasets
+        finetune_indices = None
         all_indices = range(len(test_dataset))
-        import random as _random
+        
+       
 
-        finetune_indices = _random.sample(list(all_indices), finetuneSampleN)
+        if isinstance(args.finetuning_samples,int): # Usual Finetune Path if int is Provided
+            finetuneSampleN = args.finetuning_samples
+            print(
+                "[INFO] Finetuning the model on ",
+                finetuneSampleN,
+                "test samples",
+            )
+            # split test dataset into finetuning and holdout datasets
+            import random as _random
+            finetune_indices = _random.sample(list(all_indices), finetuneSampleN)
+        else: 
+            provided_samples = None
+            with open(args.finetuning_samples,"r") as f:
+                lines = [line.strip() for line in f.readlines()]    #ATENTION this functionality expects the IDS to be Atomic and seperate in each line further extend for single line seperated by " " or ","
+                provided_samples = lines
+                
+            if len(provided_samples) == 0:
+                raise ValueError(f"Finetunsample file is empty: {args.finetuning_samples}")
+                
+            #Check if All Given IDS are in Dataset. Happens if given featurres do not contain ID
+            if not set(provided_samples).issubset(set(test_dataset.samples)):
+                missing = set(provided_samples) - set(test_dataset.samples)
+                if len(missing) < 15:
+                    raise ValueError (f"{len(missing)} sample(s) not found in reference file: {sorted(missing)}")
+                else: 
+                    raise ValueError (f"{len(missing)} sample(s) not found in reference file: {sorted(missing[:15])} and more")
+            if isinstance(test_dataset.samples,list):
+                finetune_indices = [test_dataset.samples.index(sampleid) for sampleid in provided_samples]
+            else:
+                raise TypeError(f"train_dataset samples stored not as List but as {type(test_dataset.samples) = }") ##Might be superfluis but idk if samples could be passed as something else
+            
+                
+            
         holdout_indices = list(set(all_indices) - set(finetune_indices))
         finetune_dataset = test_dataset.subset(finetune_indices)
         holdout_dataset = test_dataset.subset(holdout_indices)
@@ -1575,7 +1607,7 @@ def main():
             )
 
     # save the trained model in file; also save finetuned model when in inference mode
-    if not in_infer or args.finetuning_samples > 0:
+    if not in_infer or args.finetuning_samples != 0:
         if not args.safetensors:
             model_path = os.path.join(args.outdir, ".".join([args.prefix, "final_model.pth"]))
             torch.save(model, model_path)
@@ -1586,7 +1618,7 @@ def main():
                 ".".join([args.prefix, "final_model.safetensors"]),
             )
             _save_file(model.state_dict(), model_path)
-        if in_infer and args.finetuning_samples > 0:
+        if in_infer and args.finetuning_samples != 0:
             print(f"[INFO] Finetuned model saved to {model_path}")
         # save model config as JSON
         import json as _json
