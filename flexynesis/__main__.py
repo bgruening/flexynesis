@@ -838,7 +838,7 @@ def main():
         if not os.path.exists(args.artifacts):
             raise FileNotFoundError(f"--artifacts not found: {args.artifacts}")
 
-        if not isinstance(args.finetuning_samples, int) and not os.path.exists(args.pretrained_model):   # In case of finetune.  case sample ID file -> Check if file exist
+        if not isinstance(args.finetuning_samples, int) and not os.path.exists(args.finetuning_samples):   # In case of finetune.  case sample ID file -> Check if file exist
             raise FileNotFoundError(f"--finetunesamples Not int and File not found: {args.finetuning_samples}")
 
         # Handle device selection for inference (same logic as training)
