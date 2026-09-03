@@ -141,6 +141,16 @@ def print_full_help():
         "                        How the GNN pools node embeddings; pooling "
         "makes the graph structure load-bearing"
     )
+    print("  --gnn_head {mlp,linear}")
+    print(
+        "                        Supervisor head; 'linear' forces the graph "
+        "embedding to carry the signal"
+    )
+    print("  --gnn_no_projection")
+    print(
+        "                        Use the pooled node embeddings as the sample "
+        "representation instead of projecting to latent_dim"
+    )
     print("  --seed SEED")
     print("                        Random seed (default 42)")
     print("  --use_edge_weights")
@@ -560,6 +570,22 @@ def main():
         "'flatten' concatenates every node, which keeps a weight per node and "
         "lets the model bypass the graph; the pooling options are "
         "permutation-invariant, so node information must travel along edges",
+    )
+    parser.add_argument(
+        "--gnn_head",
+        type=str,
+        choices=["mlp", "linear"],
+        default="mlp",
+        help="Supervisor head on top of the GNN embedding. 'linear' is a "
+        "single layer, so the embedding must already be linearly separable "
+        "and the graph cannot be compensated for downstream",
+    )
+    parser.add_argument(
+        "--gnn_no_projection",
+        action="store_true",
+        help="Skip the projection into latent_dim and use the pooled node "
+        "embeddings directly as the sample representation, so it stays a "
+        "combination of node embeddings driven by the graph",
     )
     parser.add_argument(
         "--seed",
@@ -1351,6 +1377,8 @@ def main():
             gnn_conv_type=gnn_conv_type,
             use_edge_weights=args.use_edge_weights,
             gnn_readout=args.gnn_readout,
+            gnn_head=args.gnn_head,
+            gnn_project=not args.gnn_no_projection,
             input_layers=input_layers,
             output_layers=output_layers,
             num_workers=args.num_workers,

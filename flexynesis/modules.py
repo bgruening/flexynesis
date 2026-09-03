@@ -204,6 +204,7 @@ class flexGCN(nn.Module):
         conv="GC",
         act="relu",
         readout="flatten",
+        project=True,
     ):
         super().__init__()
 
@@ -268,7 +269,17 @@ class flexGCN(nn.Module):
             fc_in = node_embedding_dim * 2
         else:
             fc_in = node_embedding_dim
-        self.fc = nn.Linear(fc_in, output_dim)
+
+        # With project=False the pooled node embeddings *are* the sample
+        # representation, instead of being re-projected into a wider latent
+        # space. That keeps the representation a direct combination of node
+        # embeddings, so it can only be as good as the graph made them.
+        if project:
+            self.fc = nn.Linear(fc_in, output_dim)
+            self.output_dim = output_dim
+        else:
+            self.fc = nn.Identity()
+            self.output_dim = fc_in
 
     def forward(self, x, edge_index, edge_weight=None):
         if edge_weight is not None and not self.supports_edge_weight:

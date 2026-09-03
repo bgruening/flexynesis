@@ -65,6 +65,8 @@ class GNN(pl.LightningModule):
         gnn_conv_type=None,
         use_edge_weights=False,
         gnn_readout="flatten",
+        gnn_head="mlp",
+        gnn_project=True,
     ):
         super().__init__()
         self.config = config
@@ -101,6 +103,8 @@ class GNN(pl.LightningModule):
         self.device_type = device_type
         self.gnn_conv_type = gnn_conv_type
         self.gnn_readout = gnn_readout
+        self.gnn_head = gnn_head
+        self.gnn_project = gnn_project
 
         from ..utils import create_device_from_string
 
@@ -132,10 +136,11 @@ class GNN(pl.LightningModule):
                     num_convs=int(
                         self.config["num_convs"]
                     ),  # Number of convolutional layers
-                    output_dim=self.config["latent_dim"],
+                    output_dim=int(self.config["latent_dim"]),
                     act=self.config["activation"],
                     conv=self.gnn_conv_type,
                     readout=self.gnn_readout,
+                    project=self.gnn_project,
                 )
             ]
         )
@@ -147,11 +152,18 @@ class GNN(pl.LightningModule):
                 num_class = 1
             else:
                 num_class = len(np.unique(self.ann[var]))
-            self.MLPs[var] = MLP(
-                input_dim=self.config["latent_dim"],
-                hidden_dim=self.config["supervisor_hidden_dim"],
-                output_dim=num_class,
-            )
+            # A linear head cannot reshape a weak representation into a good
+            # prediction, so whatever separates the classes has to already be
+            # there when the graph is done with it.
+            embedding_dim = self.encoders[0].output_dim
+            if self.gnn_head == "linear":
+                self.MLPs[var] = nn.Linear(embedding_dim, num_class)
+            else:
+                self.MLPs[var] = MLP(
+                    input_dim=embedding_dim,
+                    hidden_dim=int(self.config["supervisor_hidden_dim"]),
+                    output_dim=num_class,
+                )
 
     def _dataset_edge_weight(self, dataset, device):
         """Edge weights for a dataset, or None when weighting is disabled."""

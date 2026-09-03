@@ -158,3 +158,35 @@ def test_pooling_shrinks_the_readout():
 
     assert readout_share("flatten") > 0.98
     assert readout_share("mean") < 0.85
+
+
+def test_no_projection_uses_pooled_width():
+    """Without the projection the sample embedding is the pooled node vector."""
+    projected = flexGCN(node_count=48, node_feature_count=1,
+                        node_embedding_dim=16, output_dim=105, conv="GCN",
+                        readout="mean", project=True)
+    direct = flexGCN(node_count=48, node_feature_count=1,
+                     node_embedding_dim=16, output_dim=105, conv="GCN",
+                     readout="mean", project=False)
+    assert projected.output_dim == 105
+    assert direct.output_dim == 16
+
+    x = torch.randn(2, 48, 1)
+    edge_index = torch.tensor([[0, 1], [1, 2]])
+    assert projected(x, edge_index).shape == (2, 105)
+    assert direct(x, edge_index).shape == (2, 16)
+
+
+def test_no_projection_moves_capacity_into_the_graph():
+    """The point: most parameters should end up in the convolutions."""
+    def graph_share(**kwargs):
+        model = flexGCN(node_count=48, node_feature_count=1,
+                        node_embedding_dim=16, output_dim=105, num_convs=3,
+                        conv="GCN", **kwargs)
+        total = sum(p.numel() for p in model.parameters())
+        convs = sum(p.numel() for c in model.convs for p in c.parameters())
+        return convs / total
+
+    assert graph_share(readout="flatten", project=True) < 0.02
+    # The rest is batch norm; the readout itself is parameter-free here.
+    assert graph_share(readout="mean", project=False) > 0.8
