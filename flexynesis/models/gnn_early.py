@@ -63,6 +63,7 @@ class GNN(pl.LightningModule):
         use_loss_weighting=True,
         device_type=None,
         gnn_conv_type=None,
+        use_edge_weights=False,
     ):
         super().__init__()
         self.config = config
@@ -84,6 +85,14 @@ class GNN(pl.LightningModule):
         ).variable_types
         self.ann = getattr(dataset, "multiomic_dataset", dataset).ann
         self.edge_index = dataset.edge_index
+        # Zero-weight edges encode "no connection", which is what lets a graph
+        # keep an unwired gene as a node instead of dropping it. That only
+        # holds if the weights are actually used, so without this flag such a
+        # graph would be read as fully connected.
+        self.use_edge_weights = use_edge_weights
+        self.edge_weight = (
+            getattr(dataset, "edge_weight", None) if use_edge_weights else None
+        )
 
         self.feature_importances = {}
         self.use_loss_weighting = use_loss_weighting
@@ -101,6 +110,8 @@ class GNN(pl.LightningModule):
         self.edge_index = to_device_safe(
             self.edge_index, device
         )  # edge index is re-used across samples, so we keep it in device
+        if self.edge_weight is not None:
+            self.edge_weight = to_device_safe(self.edge_weight, device)
 
         if self.use_loss_weighting:
             # Initialize log variance parameters for uncertainty weighting
@@ -139,19 +150,27 @@ class GNN(pl.LightningModule):
                 output_dim=num_class,
             )
 
-    def forward(self, x, edge_index):
+    def _dataset_edge_weight(self, dataset, device):
+        """Edge weights for a dataset, or None when weighting is disabled."""
+        if not self.use_edge_weights:
+            return None
+        weights = getattr(dataset, "edge_weight", None)
+        return None if weights is None else weights.to(device)
+
+    def forward(self, x, edge_index, edge_weight=None):
         """
         Defines the forward pass of the GNN.
 
         Args:
             x (Tensor): Node feature matrix (batch_size, num_nodes, node_feature_count).
             edge_index (Tensor): Edge index in COO format (2, num_edges).
+            edge_weight (Tensor, optional): Per-edge weights in [0, 1].
 
         Returns:
             dict: Outputs from the MLPs, one for each target variable.
         """
         # notice we are using the first encoder (it is currently a early fusion method)
-        embeddings = self.encoders[0](x, edge_index)
+        embeddings = self.encoders[0](x, edge_index, edge_weight)
         outputs = {}
         for var, mlp in self.MLPs.items():
             outputs[var] = mlp(embeddings)
@@ -169,7 +188,7 @@ class GNN(pl.LightningModule):
             float: Total loss for the batch.
         """
         x, y_dict, samples = batch
-        outputs = self.forward(x, self.edge_index)
+        outputs = self.forward(x, self.edge_index, self.edge_weight)
 
         losses = {}
         for var in self.variables:
@@ -208,7 +227,7 @@ class GNN(pl.LightningModule):
             float: Total validation loss for the batch.
         """
         x, y_dict, samples = batch
-        outputs = self.forward(x, self.edge_index)
+        outputs = self.forward(x, self.edge_index, self.edge_weight)
         losses = {}
         for var in self.variables:
             if var == self.surv_event_var:
@@ -348,6 +367,7 @@ class GNN(pl.LightningModule):
             dataset, batch_size=64, shuffle=False
         )  # Adjust the batch size as needed
         edge_index = dataset.edge_index.to(device)  # Move edge_index to GPU
+        edge_weight = self._dataset_edge_weight(dataset, device)
 
         predictions = {
             var: [] for var in self.variables
@@ -357,7 +377,7 @@ class GNN(pl.LightningModule):
         for x, y_dict, samples in dataloader:
             x = x.to(device)  # Move data to GPU
 
-            outputs = self.forward(x, edge_index)
+            outputs = self.forward(x, edge_index, edge_weight)
             for var in self.variables:
                 logits = outputs[var].detach().cpu()  # Raw model outputs (logits)
 
@@ -395,6 +415,7 @@ class GNN(pl.LightningModule):
         )
         self.to(device)  # Move the model to the appropriate device
         edge_index = dataset.edge_index.to(device)  # Move edge_index to GPU
+        edge_weight = self._dataset_edge_weight(dataset, device)
 
         dataloader = DataLoader(
             dataset, batch_size=64, shuffle=False
@@ -408,7 +429,10 @@ class GNN(pl.LightningModule):
 
             # notice we are using the first encoder (it is currently a early fusion method)
             embeddings = (
-                self.encoders[0](x, edge_index).detach().cpu().numpy()
+                self.encoders[0](x, edge_index, edge_weight)
+                .detach()
+                .cpu()
+                .numpy()
             )  # Compute embeddings and move to CPU
             all_embeddings.append(embeddings)
             sample_ids.extend(samples)
@@ -433,7 +457,9 @@ class GNN(pl.LightningModule):
         for i in range(steps):
             x_step = input_data[0][i]
             # edges_step = edge_index[i] # although, identical, they get copied.
-            out = self.forward(x_step, self.dataset_edge_index)
+            out = self.forward(
+                x_step, self.dataset_edge_index, self.dataset_edge_weight
+            )
             outputs_list.append(out[target_var])
         return torch.cat(outputs_list, dim=0)
 
@@ -482,6 +508,7 @@ class GNN(pl.LightningModule):
 
         self.to(device)
         self.dataset_edge_index = to_device_safe(dataset.edge_index, device)
+        self.dataset_edge_weight = self._dataset_edge_weight(dataset, device)
 
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
