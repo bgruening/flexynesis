@@ -136,6 +136,13 @@ def print_full_help():
         "                        If model_class is set to GNN, choose which graph "
         "convolution type to use"
     )
+    print("  --gnn_readout {flatten,mean,sum,max,meanmax}")
+    print(
+        "                        How the GNN pools node embeddings; pooling "
+        "makes the graph structure load-bearing"
+    )
+    print("  --seed SEED")
+    print("                        Random seed (default 42)")
     print("  --use_edge_weights")
     print(
         "                        If model_class is set to GNN, weight graph edges "
@@ -545,6 +552,23 @@ def main():
         help="If model_class is set to GNN, choose which graph convolution type to use",
     )
     parser.add_argument(
+        "--gnn_readout",
+        type=str,
+        choices=["flatten", "mean", "sum", "max", "meanmax"],
+        default="flatten",
+        help="How the GNN reduces per-node embeddings to one vector per sample. "
+        "'flatten' concatenates every node, which keeps a weight per node and "
+        "lets the model bypass the graph; the pooling options are "
+        "permutation-invariant, so node information must travel along edges",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed, for reproducible runs and for repeating a run "
+        "across seeds to estimate its variability",
+    )
+    parser.add_argument(
         "--use_edge_weights",
         action="store_true",
         help="If model_class is set to GNN, weight graph edges by the network's "
@@ -819,6 +843,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # main.py seeds at import time with the default; re-seed here so --seed
+    # takes effect before any model or split is drawn.
+    from lightning import seed_everything
+
+    seed_everything(args.seed, workers=True)
 
     # --------- Conditional requirements & I/O prep (applies to both modes) ---------
     # Ensure outdir exists (works for training and inference)
@@ -1320,6 +1350,7 @@ def main():
             device_type=device_type,
             gnn_conv_type=gnn_conv_type,
             use_edge_weights=args.use_edge_weights,
+            gnn_readout=args.gnn_readout,
             input_layers=input_layers,
             output_layers=output_layers,
             num_workers=args.num_workers,
