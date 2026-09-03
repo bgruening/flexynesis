@@ -1,5 +1,6 @@
 import os
 import tempfile
+import warnings
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -1164,7 +1165,7 @@ class MultiOmicDatasetNW(Dataset):
         self.gene_to_index = {
             gene: idx for idx, gene in enumerate(self.common_features)
         }
-        self.edge_index = self.create_edge_index()
+        self.edge_index, self.edge_weight = self.create_edge_index()
         self.samples = self.multiomic_dataset.samples
         self.variable_types = self.multiomic_dataset.variable_types
         self.label_mappings = self.multiomic_dataset.label_mappings
@@ -1192,19 +1193,50 @@ class MultiOmicDatasetNW(Dataset):
         return sorted(list(all_omic_features.intersection(interaction_genes)))
 
     def create_edge_index(self):
+        """Build the COO edge index and its matching edge weights.
+
+        Weights are normalised to [0, 1], where 1 is the strongest connection
+        and 0 is no connection at all. A caller can therefore keep a gene as a
+        node while leaving it unwired, by giving it only zero-weight edges --
+        without that, a gene absent from the network is dropped by
+        `find_union_features` instead of being kept as an isolated node.
+
+        Scores above 1 are divided by the maximum, so STRING's native 0-1000
+        combined scores normalise without the caller rescaling them first.
+
+        Returns:
+            tuple: (edge_index of shape (2, n_edges), edge_weight of shape
+                (n_edges,)).
+        """
         # Create edges only if both proteins are within the available features
         filtered_df = self.interaction_df[
             (self.interaction_df["protein1"].isin(self.common_features))
             & (self.interaction_df["protein2"].isin(self.common_features))
         ]
-        edge_list = [
-            (
-                self.gene_to_index[row["protein1"]],
-                self.gene_to_index[row["protein2"]],
-            )
-            for index, row in filtered_df.iterrows()
-        ]
-        return torch.tensor(edge_list, dtype=torch.long).t()
+        edge_index = torch.tensor(
+            [
+                filtered_df["protein1"].map(self.gene_to_index).tolist(),
+                filtered_df["protein2"].map(self.gene_to_index).tolist(),
+            ],
+            dtype=torch.long,
+        )
+
+        weights = filtered_df["combined_score"].to_numpy(dtype="float32")
+        if weights.size:
+            if weights.min() < 0:
+                warnings.warn(
+                    f"Network has negative edge scores (min "
+                    f"{weights.min():.4g}); clipping them to 0. Edge weights "
+                    f"are expected in [0, 1], 0 meaning no connection."
+                )
+                weights = weights.clip(min=0)
+            if weights.max() > 1:
+                print(
+                    f"[INFO] Edge scores exceed 1 (max {weights.max():.4g}); "
+                    f"dividing by the maximum to normalise to [0, 1]."
+                )
+                weights = weights / weights.max()
+        return edge_index, torch.tensor(weights, dtype=torch.float)
 
     def precompute_node_features(self):
         num_samples = len(self.samples)
@@ -1272,11 +1304,17 @@ class MultiOmicDatasetNW(Dataset):
         num_edges = self.edge_index.size(1)
         num_node_features = self.node_features_tensor.size(2)
 
+        # A zero-weight edge means "no connection", so it must not count towards
+        # degree or a node carrying only zero-weight edges looks connected.
+        connected = self.edge_weight > 0
+        num_weighted_edges = int(connected.sum().item())
+        edge_index = self.edge_index[:, connected]
+
         # Calculate degree for each node
         degrees = torch.zeros(num_nodes, dtype=torch.long)
-        degrees.index_add_(0, self.edge_index[0], torch.ones_like(self.edge_index[0]))
+        degrees.index_add_(0, edge_index[0], torch.ones_like(edge_index[0]))
         degrees.index_add_(
-            0, self.edge_index[1], torch.ones_like(self.edge_index[1])
+            0, edge_index[1], torch.ones_like(edge_index[1])
         )  # For undirected graphs
 
         num_singletons = torch.sum(degrees == 0).item()
@@ -1293,6 +1331,8 @@ class MultiOmicDatasetNW(Dataset):
         print("Dataset Statistics:")
         print(f"Number of nodes: {num_nodes}")
         print(f"Total number of edges: {num_edges}")
+        if num_weighted_edges != num_edges:
+            print(f"Edges with a non-zero weight: {num_weighted_edges}")
         print(f"Number of node features per node: {num_node_features}")
         print(f"Number of singletons (nodes with no edges): {num_singletons}")
         print(
