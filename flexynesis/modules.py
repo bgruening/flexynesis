@@ -1,5 +1,6 @@
 # Networks that can be reused across different architectures
 
+import warnings
 import torch
 from torch import nn
 from torch_geometric.nn import GATConv, GCNConv, GraphConv, SAGEConv
@@ -231,6 +232,9 @@ class flexGCN(nn.Module):
             )
 
         self.act = act_options[act]
+        # SAGEConv aggregates over neighbours with no slot for a scalar weight,
+        # and GATConv learns its own attention, so only these two can take one.
+        self.supports_edge_weight = conv in ("GCN", "GC")
         self.convs = nn.ModuleList()
         self.bns = nn.ModuleList()
         self.dropout = nn.Dropout(dropout_rate)
@@ -249,9 +253,18 @@ class flexGCN(nn.Module):
         # Final fully connected layer
         self.fc = nn.Linear(node_embedding_dim * node_count, output_dim)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_weight=None):
+        if edge_weight is not None and not self.supports_edge_weight:
+            warnings.warn(
+                "Edge weights were provided but this convolution type ignores "
+                "them; use GCN or GC to make use of them."
+            )
+            edge_weight = None
         for conv, bn in zip(self.convs, self.bns):
-            x = conv(x, edge_index)
+            if edge_weight is None:
+                x = conv(x, edge_index)
+            else:
+                x = conv(x, edge_index, edge_weight)
             x = bn(x.view(-1, x.size(2))).view_as(x)
             x = self.act(x)
             x = self.dropout(x)
