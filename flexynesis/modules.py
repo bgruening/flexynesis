@@ -203,6 +203,7 @@ class flexGCN(nn.Module):
         dropout_rate=0.2,
         conv="GC",
         act="relu",
+        readout="flatten",
     ):
         super().__init__()
 
@@ -250,8 +251,24 @@ class flexGCN(nn.Module):
             )
             self.bns.append(nn.BatchNorm1d(node_embedding_dim))
 
-        # Final fully connected layer
-        self.fc = nn.Linear(node_embedding_dim * node_count, output_dim)
+        readout_options = ("flatten", "mean", "sum", "max", "meanmax")
+        if readout not in readout_options:
+            raise ValueError(
+                "Unknown readout. Choose one of: ", list(readout_options)
+            )
+        self.readout = readout
+
+        # Final fully connected layer. "flatten" keeps one weight per (node,
+        # channel) pair, which lets the model read any node directly and makes
+        # the graph optional; the pooling readouts are permutation-invariant, so
+        # a node's contribution has to arrive through message passing.
+        if readout == "flatten":
+            fc_in = node_embedding_dim * node_count
+        elif readout == "meanmax":
+            fc_in = node_embedding_dim * 2
+        else:
+            fc_in = node_embedding_dim
+        self.fc = nn.Linear(fc_in, output_dim)
 
     def forward(self, x, edge_index, edge_weight=None):
         if edge_weight is not None and not self.supports_edge_weight:
@@ -269,8 +286,17 @@ class flexGCN(nn.Module):
             x = self.act(x)
             x = self.dropout(x)
 
-        # Flatten the output of all nodes into a single vector per graph/sample
-        x = x.view(x.size(0), -1)
+        # Reduce the per-node embeddings to one vector per graph/sample
+        if self.readout == "flatten":
+            x = x.view(x.size(0), -1)
+        elif self.readout == "mean":
+            x = x.mean(dim=1)
+        elif self.readout == "sum":
+            x = x.sum(dim=1)
+        elif self.readout == "max":
+            x = x.max(dim=1).values
+        else:  # meanmax
+            x = torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=1)
         x = self.fc(x)
         return x
 

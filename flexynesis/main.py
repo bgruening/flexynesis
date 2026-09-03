@@ -95,6 +95,7 @@ class HyperparameterTuning:
         device_type=None,
         gnn_conv_type=None,
         use_edge_weights=False,
+        gnn_readout="flatten",
         input_layers=None,
         output_layers=None,
         num_workers=2,
@@ -134,6 +135,7 @@ class HyperparameterTuning:
         self.use_loss_weighting = use_loss_weighting
         self.gnn_conv_type = gnn_conv_type
         self.use_edge_weights = use_edge_weights
+        self.gnn_readout = gnn_readout
         self.input_layers = input_layers
         self.output_layers = output_layers
 
@@ -244,6 +246,7 @@ class HyperparameterTuning:
         if self.model_class.__name__ == "GNN":
             model_args["gnn_conv_type"] = self.gnn_conv_type
             model_args["use_edge_weights"] = self.use_edge_weights
+            model_args["gnn_readout"] = self.gnn_readout
         if self.model_class.__name__ == "CrossModalPred":
             model_args["input_layers"] = self.input_layers
             model_args["output_layers"] = self.output_layers

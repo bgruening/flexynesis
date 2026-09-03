@@ -64,6 +64,7 @@ class GNN(pl.LightningModule):
         device_type=None,
         gnn_conv_type=None,
         use_edge_weights=False,
+        gnn_readout="flatten",
     ):
         super().__init__()
         self.config = config
@@ -99,6 +100,7 @@ class GNN(pl.LightningModule):
 
         self.device_type = device_type
         self.gnn_conv_type = gnn_conv_type
+        self.gnn_readout = gnn_readout
 
         from ..utils import create_device_from_string
 
@@ -133,6 +135,7 @@ class GNN(pl.LightningModule):
                     output_dim=self.config["latent_dim"],
                     act=self.config["activation"],
                     conv=self.gnn_conv_type,
+                    readout=self.gnn_readout,
                 )
             ]
         )
