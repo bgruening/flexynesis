@@ -81,7 +81,7 @@ def print_full_help():
         "usage: flexynesis [-h] --data_path DATA_PATH --model_class "
         "{DirectPred,supervised_vae,MultiTripletNetwork,CrossModalPred,GNN,"
         "RandomForest,SVM,XGBoost,RandomSurvivalForest} "
-        "[--gnn_conv_type {GC,GCN,SAGE}] [--target_variables TARGET_VARIABLES] "
+        "[--gnn_conv_type {GC,GCN,SAGE}] [--use_edge_weights] [--target_variables TARGET_VARIABLES] "
         "[--covariates COVARIATES] [--surv_event_var SURV_EVENT_VAR] "
         "[--surv_time_var SURV_TIME_VAR] [--config_path CONFIG_PATH] "
         "[--fusion_type {early,intermediate}] [--hpo_iter HPO_ITER] "
@@ -135,6 +135,11 @@ def print_full_help():
     print(
         "                        If model_class is set to GNN, choose which graph "
         "convolution type to use"
+    )
+    print("  --use_edge_weights")
+    print(
+        "                        If model_class is set to GNN, weight graph edges "
+        "by the network's scores rather than treating every edge as equal"
     )
     print("  --target_variables TARGET_VARIABLES")
     print(
@@ -538,6 +543,15 @@ def main():
         type=str,
         choices=["GC", "GCN", "SAGE"],
         help="If model_class is set to GNN, choose which graph convolution type to use",
+    )
+    parser.add_argument(
+        "--use_edge_weights",
+        action="store_true",
+        help="If model_class is set to GNN, weight graph edges by the network's "
+        "scores instead of treating every edge as equal. Scores are normalised "
+        "to [0, 1], where 0 means no connection, so a graph may list a gene with "
+        "only zero-weight edges to keep it as an isolated node. Ignored by SAGE, "
+        "which cannot use edge weights.",
     )
     parser.add_argument(
         "--target_variables",
@@ -1305,6 +1319,7 @@ def main():
             early_stop_patience=int(args.early_stop_patience),
             device_type=device_type,
             gnn_conv_type=gnn_conv_type,
+            use_edge_weights=args.use_edge_weights,
             input_layers=input_layers,
             output_layers=output_layers,
             num_workers=args.num_workers,

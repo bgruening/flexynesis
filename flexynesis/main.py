@@ -47,6 +47,7 @@ class HyperparameterTuning:
         early_stop_patience: Number of epochs with no improvement after which training will be stopped early.
         device_type: Type of device ('gpu' or 'cpu') to be used for training.
         gnn_conv_type: Specific convolution type if using Graph Neural Networks, otherwise None.
+        use_edge_weights: Whether the GNN should weight edges by the network's scores.
         input_layers: Specific input layers for models that require detailed layer setup.
         output_layers: Specific output layers for models that require detailed layer setup.
 
@@ -93,6 +94,7 @@ class HyperparameterTuning:
         early_stop_patience=-1,
         device_type=None,
         gnn_conv_type=None,
+        use_edge_weights=False,
         input_layers=None,
         output_layers=None,
         num_workers=2,
@@ -131,6 +133,7 @@ class HyperparameterTuning:
         self.early_stop_patience = early_stop_patience
         self.use_loss_weighting = use_loss_weighting
         self.gnn_conv_type = gnn_conv_type
+        self.use_edge_weights = use_edge_weights
         self.input_layers = input_layers
         self.output_layers = output_layers
 
@@ -240,6 +243,7 @@ class HyperparameterTuning:
 
         if self.model_class.__name__ == "GNN":
             model_args["gnn_conv_type"] = self.gnn_conv_type
+            model_args["use_edge_weights"] = self.use_edge_weights
         if self.model_class.__name__ == "CrossModalPred":
             model_args["input_layers"] = self.input_layers
             model_args["output_layers"] = self.output_layers
