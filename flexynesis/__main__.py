@@ -81,7 +81,7 @@ def print_full_help():
         "usage: flexynesis [-h] --data_path DATA_PATH --model_class "
         "{DirectPred,supervised_vae,MultiTripletNetwork,CrossModalPred,GNN,"
         "RandomForest,SVM,XGBoost,RandomSurvivalForest} "
-        "[--gnn_conv_type {GC,GCN,SAGE}] [--use_edge_weights] [--target_variables TARGET_VARIABLES] "
+        "[--gnn_conv_type {GC,GCN,SAGE}] [--disable_edge_weighting] [--target_variables TARGET_VARIABLES] "
         "[--covariates COVARIATES] [--surv_event_var SURV_EVENT_VAR] "
         "[--surv_time_var SURV_TIME_VAR] [--config_path CONFIG_PATH] "
         "[--fusion_type {early,intermediate}] [--hpo_iter HPO_ITER] "
@@ -136,15 +136,11 @@ def print_full_help():
         "                        If model_class is set to GNN, choose which graph "
         "convolution type to use"
     )
-    print("  --gnn_readout {flatten,mean,sum,max,meanmax}")
+    print("  --gnn_readout "
+          "{mean,sum,max,meanmax,attention,dim_attention}")
     print(
         "                        How the GNN pools node embeddings; pooling "
         "makes the graph structure load-bearing"
-    )
-    print("  --gnn_head {mlp,linear}")
-    print(
-        "                        Supervisor head; 'linear' forces the graph "
-        "embedding to carry the signal"
     )
     print("  --gnn_no_projection")
     print(
@@ -153,10 +149,10 @@ def print_full_help():
     )
     print("  --seed SEED")
     print("                        Random seed (default 42)")
-    print("  --use_edge_weights")
+    print("  --disable_edge_weighting")
     print(
-        "                        If model_class is set to GNN, weight graph edges "
-        "by the network's scores rather than treating every edge as equal"
+        "                        Ignore the network's edge scores; weighting is "
+        "on by default"
     )
     print("  --target_variables TARGET_VARIABLES")
     print(
@@ -564,21 +560,13 @@ def main():
     parser.add_argument(
         "--gnn_readout",
         type=str,
-        choices=["flatten", "mean", "sum", "max", "meanmax"],
-        default="flatten",
+        choices=["mean", "sum", "max", "meanmax", "attention", "dim_attention"],
+        default="dim_attention",
         help="How the GNN reduces per-node embeddings to one vector per sample. "
-        "'flatten' concatenates every node, which keeps a weight per node and "
-        "lets the model bypass the graph; the pooling options are "
-        "permutation-invariant, so node information must travel along edges",
-    )
-    parser.add_argument(
-        "--gnn_head",
-        type=str,
-        choices=["mlp", "linear"],
-        default="mlp",
-        help="Supervisor head on top of the GNN embedding. 'linear' is a "
-        "single layer, so the embedding must already be linearly separable "
-        "and the graph cannot be compensated for downstream",
+        "Every option reduces the node axis, so no weight is tied to a node's "
+        "index and node information has to travel along edges. 'dim_attention' "
+        "attends over each node's embedding dimensions instead, giving one "
+        "value per gene, which keeps gene identity",
     )
     parser.add_argument(
         "--gnn_no_projection",
@@ -595,13 +583,14 @@ def main():
         "across seeds to estimate its variability",
     )
     parser.add_argument(
-        "--use_edge_weights",
+        "--disable_edge_weighting",
         action="store_true",
-        help="If model_class is set to GNN, weight graph edges by the network's "
-        "scores instead of treating every edge as equal. Scores are normalised "
-        "to [0, 1], where 0 means no connection, so a graph may list a gene with "
-        "only zero-weight edges to keep it as an isolated node. Ignored by SAGE, "
-        "which cannot use edge weights.",
+        help="Ignore the network's edge scores and treat every edge as equal. "
+        "Weighting is on by default: scores are normalised to [0, 1], where 0 "
+        "means no connection, so a graph may list a gene with only zero-weight "
+        "edges to keep it as an isolated node. A network with no score column "
+        "is unweighted either way. Ignored by SAGE, which cannot use edge "
+        "weights.",
     )
     parser.add_argument(
         "--target_variables",
@@ -1375,9 +1364,8 @@ def main():
             early_stop_patience=int(args.early_stop_patience),
             device_type=device_type,
             gnn_conv_type=gnn_conv_type,
-            use_edge_weights=args.use_edge_weights,
+            use_edge_weights=not args.disable_edge_weighting,
             gnn_readout=args.gnn_readout,
-            gnn_head=args.gnn_head,
             gnn_project=not args.gnn_no_projection,
             input_layers=input_layers,
             output_layers=output_layers,

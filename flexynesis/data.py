@@ -1523,11 +1523,20 @@ def read_user_graph(fpath, sep=None, header="infer", **pd_read_csv_kw):
     # Read the file
     df = pd.read_csv(fpath, sep=sep, header=header, **pd_read_csv_kw)
 
-    # Validate: must have at least 3 columns
-    if df.shape[1] < 3:
+    # A network with only the two gene columns is an unweighted graph: give
+    # every edge the same score so the rest of the pipeline is unchanged, and
+    # edge weighting becomes a no-op rather than an error.
+    if df.shape[1] == 2:
+        print(
+            "[INFO] User graph has no score column; treating every edge as "
+            "equally weighted."
+        )
+        df = df.copy()
+        df["Score"] = 1.0
+    elif df.shape[1] < 2:
         raise ValueError(
-            f"User graph must have at least 3 columns (GeneA, GeneB, Score), "
-            f"but found only {df.shape[1]} columns."
+            f"User graph must have at least 2 columns (GeneA, GeneB) and "
+            f"optionally Score, but found only {df.shape[1]} column(s)."
         )
 
     # Get column names (handle cases with or without header)

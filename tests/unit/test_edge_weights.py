@@ -1,5 +1,7 @@
 """Edge weights on the GNN graph."""
 
+from itertools import combinations
+
 import pandas as pd
 import pytest
 import torch
@@ -97,7 +99,7 @@ def test_weights_change_the_output():
     assert not torch.allclose(full, none)
 
 
-READOUTS = ["flatten", "mean", "sum", "max", "meanmax"]
+READOUTS = ["mean", "sum", "max", "meanmax", "attention", "dim_attention"]
 
 
 @pytest.mark.parametrize("readout", READOUTS)
@@ -120,8 +122,9 @@ def test_unknown_readout_rejected():
 def test_pooling_readout_is_permutation_invariant():
     """The point of pooling: node order stops carrying information.
 
-    With flatten, relabelling the nodes changes the output, so the model can
-    read a node directly and the graph is optional. With mean it cannot.
+    A readout that kept a weight per node could read a node directly and treat
+    the graph as optional. dim_attention keeps gene identity deliberately; mean
+    does not.
     """
     torch.manual_seed(0)
     x = torch.randn(2, 5, 1)
@@ -137,17 +140,17 @@ def test_pooling_readout_is_permutation_invariant():
     pooled = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
                      output_dim=3, conv="GCN", readout="mean",
                      dropout_rate=0.0).eval()
-    flat = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
-                   output_dim=3, conv="GCN", readout="flatten",
-                   dropout_rate=0.0).eval()
+    keyed = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="dim_attention",
+                    project=False, dropout_rate=0.0).eval()
 
     assert torch.allclose(pooled(x, edge_index),
                           pooled(x_perm, edges_perm), atol=1e-5)
-    assert not torch.allclose(flat(x, edge_index), flat(x_perm, edges_perm))
+    assert not torch.allclose(keyed(x, edge_index), keyed(x_perm, edges_perm))
 
 
 def test_pooling_shrinks_the_readout():
-    """Most of the model should stop living in the final layer."""
+    """Most of the model should not live in the final layer."""
     def readout_share(readout):
         model = flexGCN(
             node_count=48, node_feature_count=1, node_embedding_dim=9,
@@ -156,8 +159,8 @@ def test_pooling_shrinks_the_readout():
         total = sum(p.numel() for p in model.parameters())
         return sum(p.numel() for p in model.fc.parameters()) / total
 
-    assert readout_share("flatten") > 0.98
     assert readout_share("mean") < 0.85
+    assert readout_share("dim_attention") < 0.95
 
 
 def test_no_projection_uses_pooled_width():
@@ -187,6 +190,92 @@ def test_no_projection_moves_capacity_into_the_graph():
         convs = sum(p.numel() for c in model.convs for p in c.parameters())
         return convs / total
 
-    assert graph_share(readout="flatten", project=True) < 0.02
     # The rest is batch norm; the readout itself is parameter-free here.
     assert graph_share(readout="mean", project=False) > 0.8
+
+
+def test_attention_is_permutation_equivariant():
+    """Attention scores nodes by content, so relabelling them changes nothing."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 1)
+    edge_index = torch.tensor([[0, 1], [1, 2]])
+    perm = torch.tensor([4, 3, 2, 1, 0])
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(len(perm))
+
+    model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="attention",
+                    dropout_rate=0.0).eval()
+    assert torch.allclose(model(x, edge_index),
+                          model(x[:, perm], inverse[edge_index]), atol=1e-5)
+
+
+def test_attention_weights_are_a_distribution_over_nodes():
+    model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="attention",
+                    dropout_rate=0.0).eval()
+    model(torch.randn(2, 5, 1), torch.tensor([[0, 1], [1, 2]]))
+    weights = model.last_attention
+    assert weights.shape == (2, 5, 1)
+    assert torch.allclose(weights.sum(dim=1).squeeze(), torch.ones(2), atol=1e-5)
+
+
+def test_attention_can_weight_nodes_unequally():
+    """Unlike mean pooling, attention is not forced to weight every node 1/N."""
+    torch.manual_seed(0)
+    model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="attention",
+                    dropout_rate=0.0).eval()
+    with torch.no_grad():
+        model.attention.weight.mul_(50.0)
+    model(torch.randn(2, 5, 1), torch.tensor([[0, 1], [1, 2]]))
+    spread = model.last_attention.squeeze(-1).std(dim=1)
+    assert (spread > 1e-3).all()
+
+
+def test_dim_attention_width_is_the_node_count():
+    """One number per gene, so the sample vector is as wide as the graph."""
+    model = flexGCN(node_count=48, node_feature_count=1, node_embedding_dim=16,
+                    output_dim=105, conv="GCN", readout="dim_attention",
+                    project=False)
+    assert model.output_dim == 48
+    x = torch.randn(2, 48, 1)
+    assert model(x, torch.tensor([[0, 1], [1, 2]])).shape == (2, 48)
+
+
+def test_dim_attention_normalises_over_dimensions_not_nodes():
+    model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="dim_attention",
+                    dropout_rate=0.0).eval()
+    model(torch.randn(2, 5, 1), torch.tensor([[0, 1], [1, 2]]))
+    weights = model.last_attention
+    assert weights.shape == (2, 5, 4)
+    # each node's weights form a distribution across its 4 dimensions
+    assert torch.allclose(weights.sum(dim=2), torch.ones(2, 5), atol=1e-5)
+
+
+def test_dim_attention_keeps_gene_identity():
+    """Unlike node pooling, relabelling nodes must change the output."""
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 1)
+    edge_index = torch.tensor([[0, 1], [1, 2]])
+    perm = torch.tensor([4, 3, 2, 1, 0])
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(len(perm))
+
+    model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                    output_dim=3, conv="GCN", readout="dim_attention",
+                    project=False, dropout_rate=0.0).eval()
+    assert not torch.allclose(model(x, edge_index),
+                              model(x[:, perm], inverse[edge_index]))
+
+
+def test_dim_attention_is_one_value_per_gene():
+    def width(readout):
+        return flexGCN(node_count=490, node_feature_count=1,
+                       node_embedding_dim=146, output_dim=105, conv="GCN",
+                       readout=readout, project=False).output_dim
+    # One value per gene, not node_embedding_dim values per gene.
+    assert width("dim_attention") == 490
+    assert width("mean") == 146
+

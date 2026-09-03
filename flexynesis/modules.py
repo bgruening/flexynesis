@@ -203,7 +203,7 @@ class flexGCN(nn.Module):
         dropout_rate=0.2,
         conv="GC",
         act="relu",
-        readout="flatten",
+        readout="dim_attention",
         project=True,
     ):
         super().__init__()
@@ -252,23 +252,47 @@ class flexGCN(nn.Module):
             )
             self.bns.append(nn.BatchNorm1d(node_embedding_dim))
 
-        readout_options = ("flatten", "mean", "sum", "max", "meanmax")
+        readout_options = ("mean", "sum", "max", "meanmax", "attention",
+                           "dim_attention")
         if readout not in readout_options:
             raise ValueError(
                 "Unknown readout. Choose one of: ", list(readout_options)
             )
         self.readout = readout
 
-        # Final fully connected layer. "flatten" keeps one weight per (node,
-        # channel) pair, which lets the model read any node directly and makes
-        # the graph optional; the pooling readouts are permutation-invariant, so
-        # a node's contribution has to arrive through message passing.
-        if readout == "flatten":
-            fc_in = node_embedding_dim * node_count
-        elif readout == "meanmax":
+        # Final fully connected layer. Every readout here reduces the node
+        # axis, so no weight is tied to a node's index: a readout that keeps one
+        # weight per (node, channel) pair lets the model read any node directly
+        # and makes the graph optional, which is why none is offered.
+        if readout == "meanmax":
             fc_in = node_embedding_dim * 2
+        elif readout == "dim_attention":
+            fc_in = node_count
         else:
             fc_in = node_embedding_dim
+
+        # Attention pooling scores each node from its own embedding, never from
+        # its index, so the pooling stays permutation-equivariant: relabel the
+        # nodes and the sample vector is unchanged. It can still emphasise
+        # informative nodes, which plain mean pooling cannot -- and because the
+        # embeddings come out of message passing, which nodes look worth
+        # attending to is decided by the graph.
+        self.attention = (
+            nn.Linear(node_embedding_dim, 1) if readout == "attention" else None
+        )
+
+        # "dim_attention" attends over the embedding *dimensions* of each node
+        # rather than over the nodes, collapsing every node to one number and
+        # concatenating those, so the sample vector is one value per gene.
+        # Gene identity survives as position, which node pooling throws away,
+        # at 1/node_embedding_dim of the width of a per-node readout. The scores come from the
+        # node's own embedding and the layer is shared across nodes, so which
+        # dimension wins can differ per gene without a per-gene parameter.
+        self.dim_attention = (
+            nn.Linear(node_embedding_dim, node_embedding_dim)
+            if readout == "dim_attention" else None
+        )
+        self.last_attention = None
 
         # With project=False the pooled node embeddings *are* the sample
         # representation, instead of being re-projected into a wider latent
@@ -298,14 +322,21 @@ class flexGCN(nn.Module):
             x = self.dropout(x)
 
         # Reduce the per-node embeddings to one vector per graph/sample
-        if self.readout == "flatten":
-            x = x.view(x.size(0), -1)
-        elif self.readout == "mean":
+        if self.readout == "mean":
             x = x.mean(dim=1)
         elif self.readout == "sum":
             x = x.sum(dim=1)
         elif self.readout == "max":
             x = x.max(dim=1).values
+        elif self.readout == "attention":
+            weights = torch.softmax(self.attention(x), dim=1)
+            self.last_attention = weights.detach()
+            x = (weights * x).sum(dim=1)
+        elif self.readout == "dim_attention":
+            # softmax over dim=2: the embedding dimensions of each node
+            weights = torch.softmax(self.dim_attention(x), dim=2)
+            self.last_attention = weights.detach()
+            x = (weights * x).sum(dim=2)
         else:  # meanmax
             x = torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=1)
         x = self.fc(x)

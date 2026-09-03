@@ -63,9 +63,8 @@ class GNN(pl.LightningModule):
         use_loss_weighting=True,
         device_type=None,
         gnn_conv_type=None,
-        use_edge_weights=False,
-        gnn_readout="flatten",
-        gnn_head="mlp",
+        use_edge_weights=True,
+        gnn_readout="dim_attention",
         gnn_project=True,
     ):
         super().__init__()
@@ -89,9 +88,8 @@ class GNN(pl.LightningModule):
         self.ann = getattr(dataset, "multiomic_dataset", dataset).ann
         self.edge_index = dataset.edge_index
         # Zero-weight edges encode "no connection", which is what lets a graph
-        # keep an unwired gene as a node instead of dropping it. That only
-        # holds if the weights are actually used, so without this flag such a
-        # graph would be read as fully connected.
+        # keep an unwired gene as a node instead of dropping it. Weighting is on
+        # by default; turning it off reads such a graph as fully connected.
         self.use_edge_weights = use_edge_weights
         self.edge_weight = (
             getattr(dataset, "edge_weight", None) if use_edge_weights else None
@@ -103,7 +101,6 @@ class GNN(pl.LightningModule):
         self.device_type = device_type
         self.gnn_conv_type = gnn_conv_type
         self.gnn_readout = gnn_readout
-        self.gnn_head = gnn_head
         self.gnn_project = gnn_project
 
         from ..utils import create_device_from_string
@@ -152,18 +149,11 @@ class GNN(pl.LightningModule):
                 num_class = 1
             else:
                 num_class = len(np.unique(self.ann[var]))
-            # A linear head cannot reshape a weak representation into a good
-            # prediction, so whatever separates the classes has to already be
-            # there when the graph is done with it.
-            embedding_dim = self.encoders[0].output_dim
-            if self.gnn_head == "linear":
-                self.MLPs[var] = nn.Linear(embedding_dim, num_class)
-            else:
-                self.MLPs[var] = MLP(
-                    input_dim=embedding_dim,
-                    hidden_dim=int(self.config["supervisor_hidden_dim"]),
-                    output_dim=num_class,
-                )
+            self.MLPs[var] = MLP(
+                input_dim=self.encoders[0].output_dim,
+                hidden_dim=int(self.config["supervisor_hidden_dim"]),
+                output_dim=num_class,
+            )
 
     def _dataset_edge_weight(self, dataset, device):
         """Edge weights for a dataset, or None when weighting is disabled."""
