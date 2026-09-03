@@ -95,3 +95,66 @@ def test_weights_change_the_output():
     full = model(x, edge_index, torch.tensor([1.0, 1.0]))
     none = model(x, edge_index, torch.tensor([0.0, 0.0]))
     assert not torch.allclose(full, none)
+
+
+READOUTS = ["flatten", "mean", "sum", "max", "meanmax"]
+
+
+@pytest.mark.parametrize("readout", READOUTS)
+def test_readout_shapes(readout):
+    model = flexGCN(
+        node_count=5, node_feature_count=1, node_embedding_dim=4,
+        output_dim=3, conv="GCN", readout=readout,
+    )
+    x = torch.randn(2, 5, 1)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]])
+    assert model(x, edge_index).shape == (2, 3)
+
+
+def test_unknown_readout_rejected():
+    with pytest.raises(ValueError):
+        flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                output_dim=3, readout="nonsense")
+
+
+def test_pooling_readout_is_permutation_invariant():
+    """The point of pooling: node order stops carrying information.
+
+    With flatten, relabelling the nodes changes the output, so the model can
+    read a node directly and the graph is optional. With mean it cannot.
+    """
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 1)
+    edge_index = torch.tensor([[0, 1], [1, 2]])
+
+    # Relabel the nodes: the graph is the same, only the ordering changes, so
+    # the edges have to be remapped too or this is a different graph.
+    perm = torch.tensor([4, 3, 2, 1, 0])
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(len(perm))
+    x_perm, edges_perm = x[:, perm], inverse[edge_index]
+
+    pooled = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                     output_dim=3, conv="GCN", readout="mean",
+                     dropout_rate=0.0).eval()
+    flat = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
+                   output_dim=3, conv="GCN", readout="flatten",
+                   dropout_rate=0.0).eval()
+
+    assert torch.allclose(pooled(x, edge_index),
+                          pooled(x_perm, edges_perm), atol=1e-5)
+    assert not torch.allclose(flat(x, edge_index), flat(x_perm, edges_perm))
+
+
+def test_pooling_shrinks_the_readout():
+    """Most of the model should stop living in the final layer."""
+    def readout_share(readout):
+        model = flexGCN(
+            node_count=48, node_feature_count=1, node_embedding_dim=9,
+            output_dim=105, num_convs=3, conv="GCN", readout=readout,
+        )
+        total = sum(p.numel() for p in model.parameters())
+        return sum(p.numel() for p in model.fc.parameters()) / total
+
+    assert readout_share("flatten") > 0.98
+    assert readout_share("mean") < 0.85
