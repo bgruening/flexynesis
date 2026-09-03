@@ -41,9 +41,15 @@ def test_scores_above_one_are_normalised():
     assert edge_weight.tolist() == pytest.approx([1.0, 0.4])
 
 
-def test_negative_scores_are_clipped():
-    with pytest.warns(UserWarning, match="negative edge scores"):
-        _, edge_weight = build_edges([("A", "B", -0.5), ("B", "C", 1.0)])
+def test_negative_scores_are_shifted_not_clipped():
+    """Anti-correlations keep their ordering instead of collapsing onto 0."""
+    _, edge_weight = build_edges([("A", "B", -1.0), ("B", "C", 1.0)])
+    # -1 -> 0, +1 -> 1; a zero correlation would land midway.
+    assert edge_weight.tolist() == pytest.approx([0.0, 1.0])
+
+    _, edge_weight = build_edges(
+        [("A", "B", -1.0), ("B", "C", 0.0)], genes=("A", "B", "C")
+    )
     assert edge_weight.tolist() == pytest.approx([0.0, 1.0])
 
 

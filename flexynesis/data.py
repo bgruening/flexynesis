@@ -1201,6 +1201,9 @@ class MultiOmicDatasetNW(Dataset):
         without that, a gene absent from the network is dropped by
         `find_union_features` instead of being kept as an isolated node.
 
+        Negative scores are shifted up by the minimum rather than clipped, so a
+        coexpression network keeps the ordering of its anti-correlations: the
+        most negative edge becomes 0 and zero correlation lands mid-scale.
         Scores above 1 are divided by the maximum, so STRING's native 0-1000
         combined scores normalise without the caller rescaling them first.
 
@@ -1223,17 +1226,19 @@ class MultiOmicDatasetNW(Dataset):
 
         weights = filtered_df["combined_score"].to_numpy(dtype="float32")
         if weights.size:
+            shifted = False
             if weights.min() < 0:
-                warnings.warn(
-                    f"Network has negative edge scores (min "
-                    f"{weights.min():.4g}); clipping them to 0. Edge weights "
-                    f"are expected in [0, 1], 0 meaning no connection."
-                )
-                weights = weights.clip(min=0)
-            if weights.max() > 1:
                 print(
-                    f"[INFO] Edge scores exceed 1 (max {weights.max():.4g}); "
-                    f"dividing by the maximum to normalise to [0, 1]."
+                    f"[INFO] Network has negative edge scores (min "
+                    f"{weights.min():.4g}); shifting all scores up by the "
+                    f"minimum before normalising."
+                )
+                weights = weights - weights.min()
+                shifted = True
+            if (shifted or weights.max() > 1) and weights.max() > 0:
+                print(
+                    f"[INFO] Normalising edge scores to [0, 1] "
+                    f"(dividing by {weights.max():.4g})."
                 )
                 weights = weights / weights.max()
         return edge_index, torch.tensor(weights, dtype=torch.float)
