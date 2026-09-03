@@ -1201,7 +1201,9 @@ class MultiOmicDatasetNW(Dataset):
         without that, a gene absent from the network is dropped by
         `find_union_features` instead of being kept as an isolated node.
 
-        Negative scores are shifted up by the minimum rather than clipped, so a
+        Rows with a score of exactly 0 are not edges at all; they only serve to
+        keep the gene as a node. Negative scores are shifted up by the minimum
+        rather than clipped, so a
         coexpression network keeps the ordering of its anti-correlations: the
         most negative edge becomes 0 and zero correlation lands mid-scale.
         Scores above 1 are divided by the maximum, so STRING's native 0-1000
@@ -1216,6 +1218,15 @@ class MultiOmicDatasetNW(Dataset):
             (self.interaction_df["protein1"].isin(self.common_features))
             & (self.interaction_df["protein2"].isin(self.common_features))
         ]
+
+        # A score of exactly 0 means "no connection", so it must not become an
+        # edge -- relying on a zero weight to neutralise it would turn such a
+        # network into a fully connected graph as soon as weighting is off.
+        # The row still did its job: naming the gene kept it as a node in
+        # find_union_features, which is how an unwired gene stays in the graph.
+        scores = pd.to_numeric(filtered_df["combined_score"], errors="coerce")
+        filtered_df = filtered_df[scores.notna() & (scores != 0)]
+
         edge_index = torch.tensor(
             [
                 filtered_df["protein1"].map(self.gene_to_index).tolist(),

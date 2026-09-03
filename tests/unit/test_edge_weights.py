@@ -29,11 +29,29 @@ def test_weights_align_with_edges():
     assert edge_weight.tolist() == pytest.approx([1.0, 0.25])
 
 
-def test_zero_weight_edge_is_kept():
-    """A zero weight means "no connection" but must keep the node in the graph."""
+def test_zero_score_is_not_an_edge():
+    """0 means "no connection", so it must not survive as an edge.
+
+    Otherwise a network listing every gene pair reads as fully connected the
+    moment edge weighting is turned off.
+    """
     edge_index, edge_weight = build_edges([("A", "B", 0.0), ("B", "C", 0.5)])
-    assert edge_index.shape == (2, 2)
-    assert edge_weight.tolist() == pytest.approx([0.0, 0.5])
+    assert edge_index.shape == (2, 1)
+    assert edge_weight.tolist() == pytest.approx([0.5])
+
+
+def test_zero_score_row_still_keeps_the_gene_as_a_node():
+    """The all-pairs listing keeps unwired genes in the graph."""
+    import pandas as pd
+
+    dataset = object.__new__(MultiOmicDatasetNW)
+    dataset.multiomic_dataset = type("D", (), {"features": {"m": ["A", "B", "C"]}})()
+    dataset.interaction_df = pd.DataFrame(
+        [("A", "B", 0.5), ("A", "C", 0.0), ("B", "C", 0.0)],
+        columns=["protein1", "protein2", "combined_score"],
+    )
+    # C appears only in zero-score rows, and must still be a node
+    assert "C" in dataset.find_union_features()
 
 
 def test_scores_above_one_are_normalised():
@@ -49,10 +67,12 @@ def test_negative_scores_are_shifted_not_clipped():
     # -1 -> 0, +1 -> 1; a zero correlation would land midway.
     assert edge_weight.tolist() == pytest.approx([0.0, 1.0])
 
+    # A middle value lands midway once the range is shifted and rescaled.
     _, edge_weight = build_edges(
-        [("A", "B", -1.0), ("B", "C", 0.0)], genes=("A", "B", "C")
+        [("A", "B", -1.0), ("B", "C", 0.5), ("A", "C", 1.0)],
+        genes=("A", "B", "C"),
     )
-    assert edge_weight.tolist() == pytest.approx([0.0, 1.0])
+    assert edge_weight.tolist() == pytest.approx([0.0, 0.75, 1.0])
 
 
 def test_edges_outside_the_feature_set_are_dropped():
