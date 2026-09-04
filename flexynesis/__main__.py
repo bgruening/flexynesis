@@ -1418,7 +1418,7 @@ def main():
                 # something else
                 raise TypeError(
                     "train_dataset samples stored not as List but as "
-                    f"{type(test_dataset.samples) = }"
+                    f"{type(test_dataset.samples)}"
                 )
 
         holdout_indices = list(set(all_indices) - set(finetune_indices))
