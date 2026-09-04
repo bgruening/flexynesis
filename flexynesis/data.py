@@ -495,7 +495,11 @@ class DataImporter:
                 correlation_threshold=self.correlation_threshold,
             )
             # apply the ranked feature list to the full (unsubsampled) matrix
-            selected = log_df.loc[log_df["selected"] == True, "feature"] if "selected" in log_df.columns else log_df["feature"]
+            selected = (
+                log_df.loc[log_df["selected"].eq(True), "feature"]
+                if "selected" in log_df.columns
+                else log_df["feature"]
+            )
             dat_filtered[layer] = X[selected].T
             feature_logs[layer] = log_df
         # update main feature logs with events from this function
@@ -1164,7 +1168,7 @@ class MultiOmicDatasetNW(Dataset):
         self.gene_to_index = {
             gene: idx for idx, gene in enumerate(self.common_features)
         }
-        self.edge_index = self.create_edge_index()
+        self.edge_index, self.edge_weight = self.create_edge_index()
         self.samples = self.multiomic_dataset.samples
         self.variable_types = self.multiomic_dataset.variable_types
         self.label_mappings = self.multiomic_dataset.label_mappings
@@ -1192,19 +1196,66 @@ class MultiOmicDatasetNW(Dataset):
         return sorted(list(all_omic_features.intersection(interaction_genes)))
 
     def create_edge_index(self):
+        """Build the COO edge index and its matching edge weights.
+
+        Weights are normalised to [0, 1], where 1 is the strongest connection
+        and 0 is no connection at all. A caller can therefore keep a gene as a
+        node while leaving it unwired, by giving it only zero-weight edges --
+        without that, a gene absent from the network is dropped by
+        `find_union_features` instead of being kept as an isolated node.
+
+        Rows with a score of exactly 0 are not edges at all; they only serve to
+        keep the gene as a node. Negative scores are shifted up by the minimum
+        rather than clipped, so a
+        coexpression network keeps the ordering of its anti-correlations: the
+        most negative edge becomes 0 and zero correlation lands mid-scale.
+        Scores above 1 are divided by the maximum, so STRING's native 0-1000
+        combined scores normalise without the caller rescaling them first.
+
+        Returns:
+            tuple: (edge_index of shape (2, n_edges), edge_weight of shape
+                (n_edges,)).
+        """
         # Create edges only if both proteins are within the available features
         filtered_df = self.interaction_df[
             (self.interaction_df["protein1"].isin(self.common_features))
             & (self.interaction_df["protein2"].isin(self.common_features))
         ]
-        edge_list = [
-            (
-                self.gene_to_index[row["protein1"]],
-                self.gene_to_index[row["protein2"]],
-            )
-            for index, row in filtered_df.iterrows()
-        ]
-        return torch.tensor(edge_list, dtype=torch.long).t()
+
+        # A score of exactly 0 means "no connection", so it must not become an
+        # edge -- relying on a zero weight to neutralise it would turn such a
+        # network into a fully connected graph as soon as weighting is off.
+        # The row still did its job: naming the gene kept it as a node in
+        # find_union_features, which is how an unwired gene stays in the graph.
+        scores = pd.to_numeric(filtered_df["combined_score"], errors="coerce")
+        filtered_df = filtered_df[scores.notna() & (scores != 0)]
+
+        edge_index = torch.tensor(
+            [
+                filtered_df["protein1"].map(self.gene_to_index).tolist(),
+                filtered_df["protein2"].map(self.gene_to_index).tolist(),
+            ],
+            dtype=torch.long,
+        )
+
+        weights = filtered_df["combined_score"].to_numpy(dtype="float32")
+        if weights.size:
+            shifted = False
+            if weights.min() < 0:
+                print(
+                    f"[INFO] Network has negative edge scores (min "
+                    f"{weights.min():.4g}); shifting all scores up by the "
+                    f"minimum before normalising."
+                )
+                weights = weights - weights.min()
+                shifted = True
+            if (shifted or weights.max() > 1) and weights.max() > 0:
+                print(
+                    f"[INFO] Normalising edge scores to [0, 1] "
+                    f"(dividing by {weights.max():.4g})."
+                )
+                weights = weights / weights.max()
+        return edge_index, torch.tensor(weights, dtype=torch.float)
 
     def precompute_node_features(self):
         num_samples = len(self.samples)
@@ -1272,11 +1323,17 @@ class MultiOmicDatasetNW(Dataset):
         num_edges = self.edge_index.size(1)
         num_node_features = self.node_features_tensor.size(2)
 
+        # A zero-weight edge means "no connection", so it must not count towards
+        # degree or a node carrying only zero-weight edges looks connected.
+        connected = self.edge_weight > 0
+        num_weighted_edges = int(connected.sum().item())
+        edge_index = self.edge_index[:, connected]
+
         # Calculate degree for each node
         degrees = torch.zeros(num_nodes, dtype=torch.long)
-        degrees.index_add_(0, self.edge_index[0], torch.ones_like(self.edge_index[0]))
+        degrees.index_add_(0, edge_index[0], torch.ones_like(edge_index[0]))
         degrees.index_add_(
-            0, self.edge_index[1], torch.ones_like(self.edge_index[1])
+            0, edge_index[1], torch.ones_like(edge_index[1])
         )  # For undirected graphs
 
         num_singletons = torch.sum(degrees == 0).item()
@@ -1293,6 +1350,8 @@ class MultiOmicDatasetNW(Dataset):
         print("Dataset Statistics:")
         print(f"Number of nodes: {num_nodes}")
         print(f"Total number of edges: {num_edges}")
+        if num_weighted_edges != num_edges:
+            print(f"Edges with a non-zero weight: {num_weighted_edges}")
         print(f"Number of node features per node: {num_node_features}")
         print(f"Number of singletons (nodes with no edges): {num_singletons}")
         print(
@@ -1478,11 +1537,20 @@ def read_user_graph(fpath, sep=None, header="infer", **pd_read_csv_kw):
     # Read the file
     df = pd.read_csv(fpath, sep=sep, header=header, **pd_read_csv_kw)
 
-    # Validate: must have at least 3 columns
-    if df.shape[1] < 3:
+    # A network with only the two gene columns is an unweighted graph: give
+    # every edge the same score so the rest of the pipeline is unchanged, and
+    # edge weighting becomes a no-op rather than an error.
+    if df.shape[1] == 2:
+        print(
+            "[INFO] User graph has no score column; treating every edge as "
+            "equally weighted."
+        )
+        df = df.copy()
+        df["Score"] = 1.0
+    elif df.shape[1] < 2:
         raise ValueError(
-            f"User graph must have at least 3 columns (GeneA, GeneB, Score), "
-            f"but found only {df.shape[1]} columns."
+            f"User graph must have at least 2 columns (GeneA, GeneB) and "
+            f"optionally Score, but found only {df.shape[1]} column(s)."
         )
 
     # Get column names (handle cases with or without header)

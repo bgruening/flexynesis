@@ -781,14 +781,19 @@ def get_predicted_labels(y_pred_dict, dataset, split, method_name):
                 (
                     dataset.label_mappings[var][int(x.item())]
                     if var in dataset.label_mappings.keys() and not np.isnan(x.item()) and not int(x.item()) == -1
-                    else "Label_not_in_train"  # catches samples ann defaulted to -1 (usually label in test but not in train) # See issue #156
+                    # catches samples ann defaulted to -1, i.e. a label in
+                    # test but not in train. See issue #156
+                    else "Label_not_in_train"
                     if int(x.item()) == -1
-                    else np.nan 
+                    else np.nan
                 )
                 for x in dataset.ann[var]
             ]
-            if "Label_not_in_train" in y_true: # See issue #156
-                print(f"[WARNING] Encoder Defaults. Some {var} values are present in test but not in test") # See issue #156
+            if "Label_not_in_train" in y_true:  # See issue #156
+                print(
+                    f"[WARNING] Encoder Defaults. Some {var} values are "
+                    "present in test but not in test"
+                )
 
             # Predicted labels (argmax of probabilities)
             y_pred_indices = np.argmax(probabilities, axis=1)
