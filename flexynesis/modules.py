@@ -3,9 +3,20 @@
 import warnings
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch_geometric.nn import GATConv, GCNConv, GraphConv, SAGEConv
 
-__all__ = ["Encoder", "Decoder", "MLP", "flexGCN", "cox_ph_loss"]
+__all__ = ["Encoder", "Decoder", "MLP", "flexGCN", "GraphMAEHead", "cox_ph_loss"]
+
+CONV_OPTIONS = {
+    "GCN": GCNConv,
+    "GAT": GATConv,
+    "SAGE": SAGEConv,
+    "GC": GraphConv,
+}
+# SAGEConv aggregates over neighbours with no slot for a scalar weight, and
+# GATConv learns its own attention, so only these two can take an edge weight.
+EDGE_WEIGHTED_CONVS = ("GCN", "GC")
 
 
 class Encoder(nn.Module):
@@ -204,7 +215,7 @@ class flexGCN(nn.Module):
         conv="GC",
         act="relu",
         readout="dim_attention",
-        project=True,
+        add_self_loops=True,
     ):
         super().__init__()
 
@@ -221,12 +232,7 @@ class flexGCN(nn.Module):
                 list(act_options.keys()),
             )
 
-        conv_options = {
-            "GCN": GCNConv,
-            "GAT": GATConv,
-            "SAGE": SAGEConv,
-            "GC": GraphConv,
-        }
+        conv_options = CONV_OPTIONS
         if conv not in conv_options:
             raise ValueError(
                 "Unknown convolution type. Choose one of: ",
@@ -234,78 +240,85 @@ class flexGCN(nn.Module):
             )
 
         self.act = act_options[act]
-        # SAGEConv aggregates over neighbours with no slot for a scalar weight,
-        # and GATConv learns its own attention, so only these two can take one.
-        self.supports_edge_weight = conv in ("GCN", "GC")
+        self.supports_edge_weight = conv in EDGE_WEIGHTED_CONVS
+
+        # GCN's renormalisation trick is defined on A + I (Kipf & Welling
+        # 2017), so self-loops are on by default. With them off, a node's
+        # representation is built purely from its neighbours and an isolated
+        # node contributes nothing. GraphConv keeps a separate root weight and
+        # SAGEConv concatenates the node's own features, so neither accepts the
+        # argument and for those two a self-connection is always present.
+        conv_kwargs = ({"add_self_loops": add_self_loops}
+                       if conv in ("GCN", "GAT") else {})
         self.convs = nn.ModuleList()
         self.bns = nn.ModuleList()
         self.dropout = nn.Dropout(dropout_rate)
 
         # Initialize the first convolution layer separately if different input size
-        self.convs.append(conv_options[conv](node_feature_count, node_embedding_dim))
+        self.convs.append(conv_options[conv](node_feature_count,
+                                             node_embedding_dim, **conv_kwargs))
         self.bns.append(nn.BatchNorm1d(node_embedding_dim))
 
         # Loop to create the remaining convolution and BN layers
         for _ in range(1, num_convs):
             self.convs.append(
-                conv_options[conv](node_embedding_dim, node_embedding_dim)
+                conv_options[conv](node_embedding_dim, node_embedding_dim,
+                                   **conv_kwargs)
             )
             self.bns.append(nn.BatchNorm1d(node_embedding_dim))
 
         readout_options = ("mean", "sum", "max", "meanmax", "attention",
-                           "dim_attention")
+                           "dim_attention", "flatten")
         if readout not in readout_options:
             raise ValueError(
                 "Unknown readout. Choose one of: ", list(readout_options)
             )
         self.readout = readout
 
-        # Final fully connected layer. Every readout here reduces the node
-        # axis, so no weight is tied to a node's index: a readout that keeps one
-        # weight per (node, channel) pair lets the model read any node directly
-        # and makes the graph optional, which is why none is offered.
+        # Width of the sample representation the final layer sees. The pooling
+        # readouts collapse the node axis entirely; "dim_attention" leaves one
+        # value per node and "flatten" leaves a node's full embedding.
         if readout == "meanmax":
             fc_in = node_embedding_dim * 2
         elif readout == "dim_attention":
             fc_in = node_count
+        elif readout == "flatten":
+            fc_in = node_count * node_embedding_dim
         else:
             fc_in = node_embedding_dim
 
-        # Attention pooling scores each node from its own embedding, never from
-        # its index, so the pooling stays permutation-equivariant: relabel the
-        # nodes and the sample vector is unchanged. It can still emphasise
-        # informative nodes, which plain mean pooling cannot -- and because the
-        # embeddings come out of message passing, which nodes look worth
-        # attending to is decided by the graph.
+        # Attention pooling scores each node from its own embedding, never
+        # from its index, so pooling stays permutation-equivariant: relabel the
+        # nodes and the sample vector is unchanged. Unlike mean pooling it can
+        # still weight informative nodes above uninformative ones.
         self.attention = (
             nn.Linear(node_embedding_dim, 1) if readout == "attention" else None
         )
 
-        # "dim_attention" attends over the embedding *dimensions* of each node
-        # rather than over the nodes, collapsing every node to one number and
-        # concatenating those, so the sample vector is one value per gene.
-        # Gene identity survives as position, which node pooling throws away,
-        # at 1/node_embedding_dim of the width of a per-node readout. The scores come from the
-        # node's own embedding and the layer is shared across nodes, so which
-        # dimension wins can differ per gene without a per-gene parameter.
+        # "dim_attention" attends over the embedding *dimensions* of each
+        # node rather than over the nodes, collapsing each node to one number
+        # and concatenating those. Node identity survives as position, which
+        # node pooling discards, at 1/node_embedding_dim of the width of
+        # "flatten". Scores come from the node's own embedding through a layer
+        # shared across nodes, so which dimension wins can differ per node
+        # without a per-node parameter.
         self.dim_attention = (
             nn.Linear(node_embedding_dim, node_embedding_dim)
             if readout == "dim_attention" else None
         )
         self.last_attention = None
 
-        # With project=False the pooled node embeddings *are* the sample
-        # representation, instead of being re-projected into a wider latent
-        # space. That keeps the representation a direct combination of node
-        # embeddings, so it can only be as good as the graph made them.
-        if project:
-            self.fc = nn.Linear(fc_in, output_dim)
-            self.output_dim = output_dim
-        else:
-            self.fc = nn.Identity()
-            self.output_dim = fc_in
+        # The readout is projected into a latent space of size output_dim,
+        # which is what the downstream heads consume.
+        self.fc = nn.Linear(fc_in, output_dim)
+        self.output_dim = output_dim
 
-    def forward(self, x, edge_index, edge_weight=None):
+    def encode_nodes(self, x, edge_index, edge_weight=None):
+        """Message passing only: returns one embedding per node, unpooled.
+
+        Kept separate from the readout so auxiliary heads that work per node
+        (e.g. GraphMAEHead) can reuse the same encoder pass.
+        """
         if edge_weight is not None and not self.supports_edge_weight:
             warnings.warn(
                 "Edge weights were provided but this convolution type ignores "
@@ -321,7 +334,10 @@ class flexGCN(nn.Module):
             x = self.act(x)
             x = self.dropout(x)
 
-        # Reduce the per-node embeddings to one vector per graph/sample
+        return x
+
+    def pool(self, x):
+        """Reduce the per-node embeddings to one vector per graph/sample."""
         if self.readout == "mean":
             x = x.mean(dim=1)
         elif self.readout == "sum":
@@ -337,10 +353,112 @@ class flexGCN(nn.Module):
             weights = torch.softmax(self.dim_attention(x), dim=2)
             self.last_attention = weights.detach()
             x = (weights * x).sum(dim=2)
+        elif self.readout == "flatten":
+            # Concatenate every node's full embedding, so the sample vector
+            # is node_count * node_embedding_dim wide and node i occupies a
+            # fixed slice. Customary when one graph is shared across samples
+            # and each sample is a signal over its nodes (Defferrard et al.
+            # 2016; Chereda et al. 2019). Unlike the pooling readouts it ties
+            # weights to node indices, which keeps node identity but costs
+            # permutation equivariance and scales with the node count.
+            x = x.reshape(x.size(0), -1)
         else:  # meanmax
             x = torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=1)
         x = self.fc(x)
         return x
+
+    def forward(self, x, edge_index, edge_weight=None, return_nodes=False):
+        nodes = self.encode_nodes(x, edge_index, edge_weight)
+        pooled = self.pool(nodes)
+        return (pooled, nodes) if return_nodes else pooled
+
+
+class GraphMAEHead(nn.Module):
+    """Masked node-feature reconstruction (GraphMAE, Hou et al. 2022, KDD).
+
+    A random subset of each sample's nodes has its input value replaced by a
+    learned mask token; the encoder runs as usual; the masked nodes' embeddings
+    are then zeroed again ("re-masking") and a one-layer graph convolution has
+    to rebuild the hidden values from the neighbours alone. Used as an
+    auxiliary objective alongside a supervised head, it pushes the encoder to
+    propagate information between neighbouring nodes.
+
+    The reconstruction target is the node features, not the adjacency matrix as
+    in the Kipf & Welling graph auto-encoder. Adjacency reconstruction is
+    invariant to a relabelling of the nodes, so it cannot express whether the
+    identities attached to the nodes are the right ones.
+    """
+
+    def __init__(
+        self,
+        node_feature_count,
+        node_embedding_dim,
+        mask_ratio=0.5,
+        loss="auto",
+        gamma=2.0,
+        conv="GCN",
+    ):
+        super().__init__()
+        if not 0.0 < mask_ratio < 1.0:
+            raise ValueError("mask_ratio must be in (0, 1)")
+        if conv not in CONV_OPTIONS:
+            raise ValueError("Unknown convolution type. Choose one of: ",
+                             list(CONV_OPTIONS))
+        self.mask_ratio = mask_ratio
+        self.gamma = gamma
+
+        # GraphMAE scores reconstruction with the scaled cosine error, which
+        # compares the *direction* of a node's feature vector. The cosine of
+        # two scalars is always +-1, so that is degenerate when a node carries
+        # a single feature (one omics layer); fall back to MSE there.
+        if loss == "auto":
+            loss = "sce" if node_feature_count > 1 else "mse"
+        if loss not in ("sce", "mse"):
+            raise ValueError("Unknown reconstruction loss. Choose 'sce', "
+                             "'mse' or 'auto'")
+        self.loss_type = loss
+
+        self.mask_token = nn.Parameter(torch.zeros(node_feature_count))
+        self.enc_to_dec = nn.Linear(node_embedding_dim, node_embedding_dim,
+                                    bias=False)
+        self.decoder = CONV_OPTIONS[conv](node_embedding_dim,
+                                          node_feature_count)
+        self.supports_edge_weight = conv in EDGE_WEIGHTED_CONVS
+
+    def apply_mask(self, x, generator=None):
+        """Replace a random subset of each sample's nodes with the mask token.
+
+        The subset is drawn per sample, so a node is hidden in some samples and
+        visible in others and no node is permanently unsupervised.
+        """
+        batch, node_count, _ = x.shape
+        k = max(1, int(round(self.mask_ratio * node_count)))
+        scores = torch.rand(batch, node_count, device=x.device,
+                            generator=generator)
+        idx = scores.argsort(dim=1)[:, :k]
+        mask = torch.zeros(batch, node_count, dtype=torch.bool,
+                           device=x.device)
+        mask.scatter_(1, idx, True)
+        token = self.mask_token.to(x.dtype).view(1, 1, -1)
+        return torch.where(mask.unsqueeze(-1), token, x), mask
+
+    def reconstruct(self, nodes, edge_index, mask, edge_weight=None):
+        nodes = self.enc_to_dec(nodes)
+        # Re-masking: a masked node's own embedding is zeroed before decoding,
+        # so its value can only be rebuilt by travelling along edges.
+        nodes = nodes.masked_fill(mask.unsqueeze(-1), 0.0)
+        if edge_weight is None or not self.supports_edge_weight:
+            return self.decoder(nodes, edge_index)
+        return self.decoder(nodes, edge_index, edge_weight)
+
+    def loss(self, x, x_hat, mask):
+        target, pred = x[mask], x_hat[mask]
+        if target.numel() == 0:
+            return torch.zeros((), device=x.device)
+        if self.loss_type == "mse":
+            return F.mse_loss(pred, target)
+        cos = F.cosine_similarity(pred, target, dim=-1)
+        return (1.0 - cos).pow(self.gamma).mean()
 
 
 def cox_ph_loss(outputs, durations, events):

@@ -1,3 +1,5 @@
+import itertools
+
 import lightning as pl
 import numpy as np
 from tqdm import tqdm
@@ -8,7 +10,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from ..modules import MLP, cox_ph_loss, flexGCN
+from ..modules import MLP, GraphMAEHead, cox_ph_loss, flexGCN
 from ..utils import to_device_safe
 
 
@@ -65,7 +67,6 @@ class GNN(pl.LightningModule):
         gnn_conv_type=None,
         use_edge_weights=True,
         gnn_readout="dim_attention",
-        gnn_project=True,
     ):
         super().__init__()
         self.config = config
@@ -101,7 +102,6 @@ class GNN(pl.LightningModule):
         self.device_type = device_type
         self.gnn_conv_type = gnn_conv_type
         self.gnn_readout = gnn_readout
-        self.gnn_project = gnn_project
 
         from ..utils import create_device_from_string
 
@@ -116,11 +116,19 @@ class GNN(pl.LightningModule):
         if self.edge_weight is not None:
             self.edge_weight = to_device_safe(self.edge_weight, device)
 
+        # The mask ratio is an ordinary hyperparameter drawn from the search
+        # space; `.get` keeps configs that predate it working at GraphMAE's
+        # default. Pinning it to 0 disables the auxiliary loss, in which case
+        # no log-variance is registered for it below.
+        self.mask_ratio = float(self.config.get("gnn_mask_ratio", 0.5))
+        self.use_mae = self.mask_ratio > 0
+
         if self.use_loss_weighting:
             # Initialize log variance parameters for uncertainty weighting
             self.log_vars = nn.ParameterDict()
-            for var in self.variables:
-                self.log_vars[var] = nn.Parameter(torch.zeros(1))
+            aux = ["recon_loss"] if self.use_mae else []
+            for loss_type in itertools.chain(self.variables, aux):
+                self.log_vars[loss_type] = nn.Parameter(torch.zeros(1))
 
         self.encoders = nn.ModuleList(
             [
@@ -137,7 +145,6 @@ class GNN(pl.LightningModule):
                     act=self.config["activation"],
                     conv=self.gnn_conv_type,
                     readout=self.gnn_readout,
-                    project=self.gnn_project,
                 )
             ]
         )
@@ -154,6 +161,21 @@ class GNN(pl.LightningModule):
                 hidden_dim=int(self.config["supervisor_hidden_dim"]),
                 output_dim=num_class,
             )
+
+        # Auxiliary masked-feature reconstruction head.
+        self.mae = (
+            GraphMAEHead(
+                node_feature_count=dataset[0][0].shape[1],
+                node_embedding_dim=int(self.config["node_embedding_dim"]),
+                mask_ratio=self.mask_ratio,
+                # resolved from the input: the scaled cosine error needs more
+                # than one feature per node to be meaningful
+                loss="auto",
+                conv=self.gnn_conv_type,
+            )
+            if self.use_mae
+            else None
+        )
 
     def _dataset_edge_weight(self, dataset, device):
         """Edge weights for a dataset, or None when weighting is disabled."""
@@ -181,6 +203,28 @@ class GNN(pl.LightningModule):
             outputs[var] = mlp(embeddings)
         return outputs
 
+    def masked_recon_loss(self, x):
+        """GraphMAE auxiliary loss: rebuild masked node values from neighbours.
+
+        This runs a second encoder pass on the masked input, so the supervised
+        head still sees the clean signal and the two objectives do not
+        interfere through the input.
+        """
+        # Validation uses a fixed mask, otherwise a stochastic term rides on
+        # val_loss and adds noise to the early-stopping decision.
+        generator = None
+        if not self.training:
+            generator = torch.Generator(device=x.device)
+            generator.manual_seed(0)
+        x_masked, mask = self.mae.apply_mask(x, generator=generator)
+        nodes = self.encoders[0].encode_nodes(
+            x_masked, self.edge_index, self.edge_weight
+        )
+        x_hat = self.mae.reconstruct(
+            nodes, self.edge_index, mask, self.edge_weight
+        )
+        return self.mae.loss(x, x_hat, mask)
+
     def training_step(self, batch, batch_idx, log=True):
         """
         Performs a training step including loss calculation and logging.
@@ -195,7 +239,7 @@ class GNN(pl.LightningModule):
         x, y_dict, samples = batch
         outputs = self.forward(x, self.edge_index, self.edge_weight)
 
-        losses = {}
+        losses = {"recon_loss": self.masked_recon_loss(x)} if self.mae else {}
         for var in self.variables:
             if var == self.surv_event_var:
                 durations = y_dict[self.surv_time_var]
@@ -233,7 +277,7 @@ class GNN(pl.LightningModule):
         """
         x, y_dict, samples = batch
         outputs = self.forward(x, self.edge_index, self.edge_weight)
-        losses = {}
+        losses = {"recon_loss": self.masked_recon_loss(x)} if self.mae else {}
         for var in self.variables:
             if var == self.surv_event_var:
                 durations = y_dict[self.surv_time_var]

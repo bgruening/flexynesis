@@ -46,6 +46,10 @@ search_spaces = {
         Integer(1, 4, name="num_convs"),  # number of convolutional layers
         Real(0.0001, 0.01, prior="log-uniform", name="lr"),
         Integer(8, 32, name="supervisor_hidden_dim"),
+        # Fraction of nodes hidden for the masked-reconstruction loss.
+        # GraphMAE reports 0.5-0.75 as the useful band, but the optimum is
+        # dataset-dependent, so it is tuned rather than fixed.
+        Real(0.1, 0.7, name="gnn_mask_ratio"),
         Categorical(epochs, name="epochs"),
         Categorical(["relu"], name="activation"),
     ],

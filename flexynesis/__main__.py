@@ -137,12 +137,11 @@ def print_full_help():
         "convolution type to use"
     )
     print("  --gnn_readout "
-          "{mean,sum,max,meanmax,attention,dim_attention}")
+          "{mean,sum,max,meanmax,attention,dim_attention,flatten}")
     print(
-        "                        How the GNN pools node embeddings; pooling "
-        "makes the graph structure load-bearing"
+        "                        How the GNN reduces per-node embeddings to "
+        "one vector per sample"
     )
-    print("  --gnn_no_projection")
     print(
         "                        Use the pooled node embeddings as the sample "
         "representation instead of projecting to latent_dim"
@@ -560,20 +559,15 @@ def main():
     parser.add_argument(
         "--gnn_readout",
         type=str,
-        choices=["mean", "sum", "max", "meanmax", "attention", "dim_attention"],
+        choices=["mean", "sum", "max", "meanmax", "attention", "dim_attention",
+                 "flatten"],
         default="dim_attention",
-        help="How the GNN reduces per-node embeddings to one vector per sample. "
-        "Every option reduces the node axis, so no weight is tied to a node's "
-        "index and node information has to travel along edges. 'dim_attention' "
-        "attends over each node's embedding dimensions instead, giving one "
-        "value per gene, which keeps gene identity",
-    )
-    parser.add_argument(
-        "--gnn_no_projection",
-        action="store_true",
-        help="Skip the projection into latent_dim and use the pooled node "
-        "embeddings directly as the sample representation, so it stays a "
-        "combination of node embeddings driven by the graph",
+        help="How the GNN reduces per-node embeddings to one vector per "
+        "sample. 'mean'/'sum'/'max'/'meanmax'/'attention' pool over the node "
+        "axis, discarding which node carried a value. 'dim_attention' attends "
+        "over each node's embedding dimensions instead, giving one value per "
+        "node. 'flatten' concatenates every node's full embedding, which keeps "
+        "the most node-level detail but scales with the node count",
     )
     parser.add_argument(
         "--seed",
@@ -1366,7 +1360,6 @@ def main():
             gnn_conv_type=gnn_conv_type,
             use_edge_weights=not args.disable_edge_weighting,
             gnn_readout=args.gnn_readout,
-            gnn_project=not args.gnn_no_projection,
             input_layers=input_layers,
             output_layers=output_layers,
             num_workers=args.num_workers,

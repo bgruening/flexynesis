@@ -121,6 +121,12 @@ GNN:
     name: supervisor_hidden_dim
     low: 8
     high: 32
+  # Fraction of nodes hidden for the masked-reconstruction loss. Omitting this
+  # entry falls back to 0.5; pinning it to 0 disables the auxiliary loss.
+  - type: Real
+    name: gnn_mask_ratio
+    low: 0.1
+    high: 0.7
   - type: Categorical
     name: batch_size
     categories: [32, 64, 128]
