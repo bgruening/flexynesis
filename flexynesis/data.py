@@ -1,6 +1,5 @@
 import os
 import tempfile
-import warnings
 from functools import reduce
 from itertools import chain
 from pathlib import Path

@@ -1,7 +1,5 @@
 """Edge weights on the GNN graph."""
 
-from itertools import combinations
-
 import pandas as pd
 import pytest
 import torch
@@ -162,7 +160,7 @@ def test_pooling_readout_is_permutation_invariant():
                      dropout_rate=0.0).eval()
     keyed = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
                     output_dim=3, conv="GCN", readout="dim_attention",
-                    project=False, dropout_rate=0.0).eval()
+                    dropout_rate=0.0).eval()
 
     assert torch.allclose(pooled(x, edge_index),
                           pooled(x_perm, edges_perm), atol=1e-5)
@@ -183,35 +181,14 @@ def test_pooling_shrinks_the_readout():
     assert readout_share("dim_attention") < 0.95
 
 
-def test_no_projection_uses_pooled_width():
-    """Without the projection the sample embedding is the pooled node vector."""
-    projected = flexGCN(node_count=48, node_feature_count=1,
-                        node_embedding_dim=16, output_dim=105, conv="GCN",
-                        readout="mean", project=True)
-    direct = flexGCN(node_count=48, node_feature_count=1,
-                     node_embedding_dim=16, output_dim=105, conv="GCN",
-                     readout="mean", project=False)
-    assert projected.output_dim == 105
-    assert direct.output_dim == 16
-
+def test_projection_sets_the_sample_width():
+    """The readout is always projected into output_dim."""
+    model = flexGCN(node_count=48, node_feature_count=1,
+                    node_embedding_dim=16, output_dim=105, conv="GCN",
+                    readout="mean")
+    assert model.output_dim == 105
     x = torch.randn(2, 48, 1)
-    edge_index = torch.tensor([[0, 1], [1, 2]])
-    assert projected(x, edge_index).shape == (2, 105)
-    assert direct(x, edge_index).shape == (2, 16)
-
-
-def test_no_projection_moves_capacity_into_the_graph():
-    """The point: most parameters should end up in the convolutions."""
-    def graph_share(**kwargs):
-        model = flexGCN(node_count=48, node_feature_count=1,
-                        node_embedding_dim=16, output_dim=105, num_convs=3,
-                        conv="GCN", **kwargs)
-        total = sum(p.numel() for p in model.parameters())
-        convs = sum(p.numel() for c in model.convs for p in c.parameters())
-        return convs / total
-
-    # The rest is batch norm; the readout itself is parameter-free here.
-    assert graph_share(readout="mean", project=False) > 0.8
+    assert model(x, torch.tensor([[0, 1], [1, 2]])).shape == (2, 105)
 
 
 def test_attention_is_permutation_equivariant():
@@ -254,13 +231,12 @@ def test_attention_can_weight_nodes_unequally():
 
 
 def test_dim_attention_width_is_the_node_count():
-    """One number per gene, so the sample vector is as wide as the graph."""
+    """One number per gene, so the readout is as wide as the graph."""
     model = flexGCN(node_count=48, node_feature_count=1, node_embedding_dim=16,
-                    output_dim=105, conv="GCN", readout="dim_attention",
-                    project=False)
-    assert model.output_dim == 48
+                    output_dim=105, conv="GCN", readout="dim_attention")
+    assert model.fc.in_features == 48
     x = torch.randn(2, 48, 1)
-    assert model(x, torch.tensor([[0, 1], [1, 2]])).shape == (2, 48)
+    assert model(x, torch.tensor([[0, 1], [1, 2]])).shape == (2, 105)
 
 
 def test_dim_attention_normalises_over_dimensions_not_nodes():
@@ -285,7 +261,7 @@ def test_dim_attention_keeps_gene_identity():
 
     model = flexGCN(node_count=5, node_feature_count=1, node_embedding_dim=4,
                     output_dim=3, conv="GCN", readout="dim_attention",
-                    project=False, dropout_rate=0.0).eval()
+                    dropout_rate=0.0).eval()
     assert not torch.allclose(model(x, edge_index),
                               model(x[:, perm], inverse[edge_index]))
 
@@ -294,8 +270,7 @@ def test_dim_attention_is_one_value_per_gene():
     def width(readout):
         return flexGCN(node_count=490, node_feature_count=1,
                        node_embedding_dim=146, output_dim=105, conv="GCN",
-                       readout=readout, project=False).output_dim
+                       readout=readout).fc.in_features
     # One value per gene, not node_embedding_dim values per gene.
     assert width("dim_attention") == 490
     assert width("mean") == 146
-
