@@ -495,7 +495,11 @@ class DataImporter:
                 correlation_threshold=self.correlation_threshold,
             )
             # apply the ranked feature list to the full (unsubsampled) matrix
-            selected = log_df.loc[log_df["selected"] == True, "feature"] if "selected" in log_df.columns else log_df["feature"]
+            selected = (
+                log_df.loc[log_df["selected"].eq(True), "feature"]
+                if "selected" in log_df.columns
+                else log_df["feature"]
+            )
             dat_filtered[layer] = X[selected].T
             feature_logs[layer] = log_df
         # update main feature logs with events from this function

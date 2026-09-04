@@ -891,7 +891,10 @@ def main():
         if not os.path.exists(args.artifacts):
             raise FileNotFoundError(f"--artifacts not found: {args.artifacts}")
 
-        if not isinstance(args.finetuning_samples, int) and not os.path.exists(args.finetuning_samples):   # In case of finetune.  case sample ID file -> Check if file exist
+        # In case of finetune. case sample ID file -> check the file exists
+        if not isinstance(args.finetuning_samples, int) and not os.path.exists(
+            args.finetuning_samples
+        ):
             raise FileNotFoundError(f"--finetunesamples Not int and File not found: {args.finetuning_samples}")
 
         # Handle device selection for inference (same logic as training)
@@ -1016,32 +1019,30 @@ def main():
         print(f"[INFO] Test dataset loaded: {len(test_dataset.samples)} samples")
 
     # Import evaluation utilities needed in the shared evaluation section below
-    import pandas as pd  
+    import pandas as pd
 
-    from .utils import evaluate_wrapper, get_predicted_labels  
+    from .utils import evaluate_wrapper, get_predicted_labels
 
     # Continue to evaluation section (skip training)
 
     # ------------- Heavy imports only when training or in inference with evaluation ---
     if not (args.pretrained_model and args.artifacts and args.data_path_test):
-        import json  
-        import tracemalloc  
+        import json
+        import tracemalloc
 
-        import torch  
-        from safetensors.torch import save_file  # 
+        import torch
 
         # data + utils
-        from .data import (STRING, DataImporter,  
-                           MultiOmicDatasetNW)
-        from .main import HyperparameterTuning  
-        from .models.crossmodal_pred import CrossModalPred  
+        from .data import STRING, DataImporter, MultiOmicDatasetNW
+        from .main import HyperparameterTuning
+        from .models.crossmodal_pred import CrossModalPred
         # models
-        from .models.direct_pred import DirectPred  
-        from .models.gnn_early import GNN  
-        from .models.supervised_vae import supervised_vae  
-        from .models.triplet_encoder import MultiTripletNetwork  
-        from .utils import evaluate_baseline_performance  
-        from .utils import (evaluate_baseline_survival_performance,
+        from .models.direct_pred import DirectPred
+        from .models.gnn_early import GNN
+        from .models.supervised_vae import supervised_vae
+        from .models.triplet_encoder import MultiTripletNetwork
+        from .utils import (evaluate_baseline_performance,
+                            evaluate_baseline_survival_performance,
                             get_device_memory_info, get_optimal_device)
 
         # --------- Sanity checks on args ---------
@@ -1219,7 +1220,7 @@ def main():
         # classical ML baselines
         if args.model_class == "XGBoost":
             try:
-                from xgboost import XGBClassifier  
+                from xgboost import XGBClassifier  # noqa: F401
             except Exception:
                 raise ImportError(
                     "XGBoost is not available. On macOS, install the OpenMP runtime: "
@@ -1369,16 +1370,14 @@ def main():
         model, best_params = tuner.perform_tuning(hpo_patience=args.hpo_patience)
 
     # if fine-tuning is enabled; fine tune the model on a portion of test samples
-    finetune_dataset = None # Will capture the Finetunesamples for the predicted_label output
+    finetune_dataset = None  # captures the Finetunesamples for predicted_label
     if args.finetuning_samples != 0:
         from .main import FineTuner
 
         finetune_indices = None
         all_indices = range(len(test_dataset))
-        
-       
 
-        if isinstance(args.finetuning_samples,int): # Usual Finetune Path if int is Provided
+        if isinstance(args.finetuning_samples, int):  # usual path when an int is given
             finetuneSampleN = args.finetuning_samples
             print(
                 "[INFO] Finetuning the model on ",
@@ -1388,29 +1387,40 @@ def main():
             # split test dataset into finetuning and holdout datasets
             import random as _random
             finetune_indices = _random.sample(list(all_indices), finetuneSampleN)
-        else: 
+        else:
             provided_samples = None
-            with open(args.finetuning_samples,"r") as f:
-                lines = [line.strip() for line in f.readlines()]    #ATENTION this functionality expects the IDS to be Atomic and seperate in each line further extend for single line seperated by " " or ","
+            with open(args.finetuning_samples, "r") as f:
+                # ATENTION this functionality expects the IDS to be Atomic and
+                # seperate in each line; extend for a single line seperated by
+                # " " or ","
+                lines = [line.strip() for line in f.readlines()]
                 provided_samples = lines
-                
+
             if len(provided_samples) == 0:
                 raise ValueError(f"Finetunsample file is empty: {args.finetuning_samples}")
-                
-            #Check if All Given IDS are in Dataset. Happens if given featurres do not contain ID
+
+            # Check if All Given IDS are in Dataset. Happens if given featurres do not contain ID
             if not set(provided_samples).issubset(set(test_dataset.samples)):
                 missing = set(provided_samples) - set(test_dataset.samples)
                 if len(missing) < 15:
-                    raise ValueError (f"{len(missing)} sample(s) not found in reference file: {sorted(missing)}")
-                else: 
-                    raise ValueError (f"{len(missing)} sample(s) not found in reference file: {sorted(missing[:15])} and more")
-            if isinstance(test_dataset.samples,list):
+                    raise ValueError(
+                        f"{len(missing)} sample(s) not found in reference file: {sorted(missing)}"
+                    )
+                else:
+                    raise ValueError(
+                        f"{len(missing)} sample(s) not found in reference file: "
+                        f"{sorted(missing)[:15]} and more"
+                    )
+            if isinstance(test_dataset.samples, list):
                 finetune_indices = [test_dataset.samples.index(sampleid) for sampleid in provided_samples]
             else:
-                raise TypeError(f"train_dataset samples stored not as List but as {type(test_dataset.samples) = }") ##Might be superfluis but idk if samples could be passed as something else
-            
-                
-            
+                # Might be superfluis but idk if samples could be passed as
+                # something else
+                raise TypeError(
+                    "train_dataset samples stored not as List but as "
+                    f"{type(test_dataset.samples) = }"
+                )
+
         holdout_indices = list(set(all_indices) - set(finetune_indices))
         finetune_dataset = test_dataset.subset(finetune_indices)
         holdout_dataset = test_dataset.subset(holdout_indices)
@@ -1468,7 +1478,8 @@ def main():
                     f"[INFO] Subsampling {captum_sample_cap} of {len(train_dataset)} "
                     "training samples for Captum feature importance"
                 )
-                import random; random.seed(42)
+                import random
+                random.seed(42)
                 captum_indices = random.sample(range(len(train_dataset)), captum_sample_cap)
                 captum_dataset = train_dataset.subset(captum_indices)
             else:
@@ -1547,7 +1558,7 @@ def main():
                 ],
                 ignore_index=True,
             )
-        else :
+        else:
             predicted_labels = get_predicted_labels(
                 model.predict(test_dataset),
                 test_dataset,
@@ -1759,9 +1770,9 @@ def main():
                 print(f"[INFO] Wrote inference artifacts to {joblib_path}")
 
             elif args.safetensors:
-                import numpy as np  
-                from sklearn.preprocessing import LabelEncoder  
-                from sklearn.preprocessing import (OrdinalEncoder,
+                import numpy as np
+                from sklearn.preprocessing import (LabelEncoder,
+                                                   OrdinalEncoder,
                                                    StandardScaler)
 
                 json_ready = {
