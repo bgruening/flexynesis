@@ -885,14 +885,14 @@ class DataImporterInference:
 
                     label_mappings[col][-1] = "Unknown"  # For missing values
                 else:
-                    try:
+                    if np.issubdtype(labels_df[col].dtype, np.number):
                         ann_dict[col] = torch.from_numpy(labels_df[col].values).float()
                         variable_types[col] = "numerical"
-                    except (ValueError, TypeError): #this is a bandaid fix and should be replace by a if els ethat checks the colum on numerics beforehand
+                    else:
                         failed_colums.append(col)
 
-                print(f"[INFO] Feature(s) could not be encoded and will be ignored: {failed_colums}")
-
+            print(f"[INFO] Feature(s) could not be encoded and will be ignored: {failed_colums}")
+            labels_df.drop(columns=failed_colums, inplace=True)
 
         # Create features dict
         # For early fusion, get features from scalers since feature_lists only has 'all'
